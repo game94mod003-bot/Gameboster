@@ -268,6 +268,12 @@ class MainActivity : Activity() {
         tvLog.typeface = Typeface.MONOSPACE
         tvLog.layoutDirection = View.LAYOUT_DIRECTION_LTR
         c7.addView(tvLog)
+        c7.setOnLongClickListener {
+            val cm = getSystemService(android.content.ClipboardManager::class.java)
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("log", AetherVpnService.logText()))
+            toast("لاگ کپی شد")
+            true
+        }
         root.addView(c7)
 
         btnScan.setOnClickListener { doScan() }
@@ -308,17 +314,32 @@ class MainActivity : Activity() {
         scanStart = SystemClock.elapsedRealtime()
         val dur = scanDur
         thread {
-            AetherVpnService.log("شروع اسکن (${dur / 60} دقیقه)")
-            val res = Scanner.scan(dur)
-            if (res.isEmpty()) {
-                AetherVpnService.log("هیچ آی‌پی پاسخ نداد؛ اینترنت یا فیلترشکن دیگر را بررسی کنید")
-            } else {
-                val top = res.take(8)
-                Store.put(this, "ep_host", top[0].ip)
-                Store.put(this, "ep_port", "443")
-                Store.put(this, "ep_ms", top[0].ms.toString())
-                Store.put(this, "ep_list", top.joinToString(",") { it.ip })
-                AetherVpnService.log("بهترین: ${top[0].ip} (${top[0].ms}ms) | ${Scanner.tested} تست، ${Scanner.alive} سالم، ${Scanner.h2Count} h2")
+            try {
+                if (Store.get(this, "addr4").isEmpty() && Store.get(this, "addr6").isEmpty()) {
+                    AetherVpnService.log("ابتدا کلید WARP گرفته می‌شود...")
+                    WarpApi.register(this) { AetherVpnService.log(it) }
+                }
+                AetherVpnService.log("شروع اسکن (${dur / 60} دقیقه)")
+                val res = Scanner.scan(this, dur)
+                val stat = "${Scanner.tested.get()} تست | TCP: ${Scanner.tcpOk.get()} | TLS+h2: ${Scanner.tlsOk.get()} | تاییدشده: ${Scanner.verified.get()}"
+                val errs = Scanner.errors.entries.sortedByDescending { it.value.get() }.take(3)
+                    .joinToString(", ") { "${it.key}=${it.value.get()}" }
+                if (res.isEmpty()) {
+                    AetherVpnService.log("آی‌پی سالمی پیدا نشد | $stat | خطاها: $errs")
+                    if (Scanner.tcpOk.get() > 0 && Scanner.tlsOk.get() == 0) {
+                        AetherVpnService.log("TCP باز است ولی TLS جواب نمی‌دهد؛ احتمالا فیلتر است. اینترنت (وای‌فای/سیم‌کارت) را عوض کنید")
+                    }
+                } else {
+                    val top = res.take(8)
+                    Store.put(this, "ep_host", top[0].ip)
+                    Store.put(this, "ep_port", "443")
+                    Store.put(this, "ep_ms", top[0].ms.toString())
+                    Store.put(this, "ep_level", top[0].level.toString())
+                    Store.put(this, "ep_list", top.joinToString(",") { "${it.ip}@${it.mode}" })
+                    AetherVpnService.log("بهترین: ${top[0].ip} (${top[0].ms}ms، سطح ${top[0].level}) | $stat")
+                }
+            } catch (e: Exception) {
+                AetherVpnService.log("خطای اسکن: ${e.message}")
             }
             scanning = false
         }
@@ -471,12 +492,12 @@ class MainActivity : Activity() {
             val el = (SystemClock.elapsedRealtime() - scanStart) / 1000
             val b = Scanner.best
             tvScan.text = "در حال اسکن ${mmss(el)} / ${mmss(scanDur.toLong())}" +
-                "\nتست‌شده: ${Scanner.tested} | سالم: ${Scanner.alive} | h2: ${Scanner.h2Count}" +
-                (if (b != null) "\nبهترین تا الان: ${b.ip} (${b.ms}ms)" else "")
+                "\nتست‌شده: ${Scanner.tested.get()} | TCP: ${Scanner.tcpOk.get()} | TLS+h2: ${Scanner.tlsOk.get()} | تاییدشده: ${Scanner.verified.get()}" +
+                (if (b != null) "\nبهترین تا الان: ${b.ip} (${b.ms}ms، سطح ${b.level})" else "")
             btnScan.text = "توقف اسکن"
         } else {
             btnScan.text = "شروع اسکن"
-            if (Scanner.tested > 0 && tvScan.text.isEmpty()) tvScan.text = ""
+            if (Scanner.tested.get() > 0 && tvScan.text.isEmpty()) tvScan.text = ""
             if (!scanning && tvScan.text.startsWith("در حال")) tvScan.text = "اسکن تمام شد"
         }
 

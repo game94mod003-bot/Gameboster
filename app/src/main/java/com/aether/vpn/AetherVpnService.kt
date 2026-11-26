@@ -84,11 +84,11 @@ class AetherVpnService : VpnService() {
         }
     }
 
-    private val sni = "consumer-masque.cloudflareclient.com"
+    private data class Att(val host: String, val mode: Int, val sni: String)
 
     @Volatile private var running = false
     @Volatile private var conn: Http2Conn? = null
-    @Volatile private var rawSock: Socket? = null
+    @Volatile private var netConn: Net.Conn? = null
     @Volatile private var pfd: ParcelFileDescriptor? = null
     @Volatile private var tunOut: FileOutputStream? = null
     @Volatile private var pongs = 0
@@ -143,7 +143,7 @@ class AetherVpnService : VpnService() {
         } catch (e: Exception) {
         }
         try {
-            rawSock?.close()
+            netConn?.close()
         } catch (e: Exception) {
         }
         try {
@@ -153,7 +153,7 @@ class AetherVpnService : VpnService() {
         pfd = null
         tunOut = null
         conn = null
-        rawSock = null
+        netConn = null
     }
 
     override fun onRevoke() {
@@ -174,33 +174,19 @@ class AetherVpnService : VpnService() {
         } catch (e: Exception) {
         }
         try {
-            rawSock?.close()
+            netConn?.close()
         } catch (e: Exception) {
         }
         conn = null
-        rawSock = null
+        netConn = null
     }
 
     /** Opens TCP + TLS(h2) + CONNECT-IP to one endpoint. Throws on any failure. */
-    private fun openTunnel(host: String, port: Int): Http2Conn {
-        log("اتصال به $host:$port")
-        val raw = Socket()
-        rawSock = raw
-        raw.bind(InetSocketAddress(0))          // forces the socket fd to exist so protect() works
-        if (!protect(raw)) throw Exception("protect ناموفق بود (سوکت)")
-        raw.tcpNoDelay = true
-        raw.connect(InetSocketAddress(host, port), 6000)
-
-        val ssl = KeyHelper.sslContext().socketFactory.createSocket(raw, sni, port, true) as SSLSocket
-        val sp = ssl.sslParameters
-        sp.applicationProtocols = arrayOf("h2")
-        sp.setServerNames(listOf<SNIServerName>(SNIHostName(sni)))
-        ssl.sslParameters = sp
-        ssl.soTimeout = 8000
-        ssl.startHandshake()
-        val alpn = ssl.applicationProtocol
-        if (alpn != "h2") throw Exception("سرور HTTP/2 را نپذیرفت (alpn=$alpn)")
-        ssl.soTimeout = 0
+    private fun openTunnel(host: String, port: Int, mode: Int, sni: String): Http2Conn {
+        log("اتصال به $host:$port (${if (mode == 1) "frag" else "direct"})")
+        val nc = Net.open(host, port, sni, mode, { s -> protect(s) }, KeyHelper.sslContext(), 4000, 5000)
+        netConn = nc
+        val ssl = nc.ssl
 
         val c = Http2Conn(ssl)
         conn = c
@@ -235,28 +221,45 @@ class AetherVpnService : VpnService() {
             val a6 = Store.get(this, "addr6")
             if (a4.isEmpty() && a6.isEmpty()) throw Exception("کلید WARP ندارید؛ ابتدا دریافت کنید")
             val port = Store.get(this, "ep_port", "443").toIntOrNull() ?: 443
-            val hosts = ArrayList<String>()
-            val first = Store.get(this, "ep_host")
-            if (first.isNotEmpty()) hosts.add(first)
-            for (x in Store.get(this, "ep_list").split(",")) {
-                if (x.isNotEmpty() && !hosts.contains(x)) hosts.add(x)
+            val atts = ArrayList<Att>()
+            fun add(h: String, m: Int, sni: String) {
+                if (h.isNotEmpty() && atts.none { it.host == h && it.mode == m && it.sni == sni }) atts.add(Att(h, m, sni))
             }
+            // scanned endpoints first (entries look like "ip@mode"), each with the mode it was verified with
+            val scanned = ArrayList<Pair<String, Int>>()
+            val first = Store.get(this, "ep_host")
+            for (x in Store.get(this, "ep_list").split(",")) {
+                if (x.isEmpty()) continue
+                scanned.add(Pair(x.substringBefore("@"), x.substringAfter("@", "").toIntOrNull() ?: -1))
+            }
+            if (first.isNotEmpty() && scanned.none { it.first == first }) scanned.add(0, Pair(first, -1))
+            for (e in scanned) add(e.first, if (e.second == 0) 0 else 1, Net.SNI1)
             val e4 = Store.get(this, "reg_ep4")
-            if (e4.isNotEmpty() && !hosts.contains(e4)) hosts.add(e4)
-            if (hosts.isEmpty()) throw Exception("کانفیگ ندارید؛ ابتدا اسکن کنید")
+            val e6 = Store.get(this, "reg_ep6")
+            add(e4, 1, Net.SNI1)
+            add(e4, 0, Net.SNI1)
+            add(e6, 1, Net.SNI1)
+            for (e in scanned) add(e.first, if (e.second == 0) 1 else 0, Net.SNI1)
+            add("162.159.198.2", 1, Net.SNI1)
+            add(e4, 1, Net.SNI2)
+            add(e4, 0, Net.SNI2)
+            if (atts.isEmpty()) throw Exception("کانفیگ ندارید؛ ابتدا اسکن کنید")
 
             var found: Http2Conn? = null
             var lastErr = "ناموفق"
-            for (host in hosts.take(6)) {
+            for (a in atts.take(10)) {
                 if (!running) return
                 try {
-                    found = openTunnel(host, port)
+                    found = openTunnel(a.host, port, a.mode, a.sni)
                     break
                 } catch (e: Exception) {
                     lastErr = e.message ?: "خطا"
-                    log("$host ناموفق: $lastErr")
+                    log("${a.host} ناموفق: $lastErr")
                     closeQuiet()
                 }
+            }
+            if (found == null && lastErr.contains("timed out")) {
+                lastErr = "سرور پاسخ نداد (timeout). شبکه/اپراتور را عوض کنید و دوباره اسکن بزنید"
             }
             val c: Http2Conn = found ?: throw Exception(lastErr)
             if (!running) return

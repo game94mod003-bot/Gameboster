@@ -1,61 +1,78 @@
 package com.aether.vpn
 
+import android.content.Context
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.security.cert.X509Certificate
+import java.net.SocketTimeoutException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
-import javax.net.ssl.SNIHostName
-import javax.net.ssl.SNIServerName
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 
-/** Time-boxed scanner for Cloudflare WARP endpoints (TCP latency + TLS/h2 check). */
+/**
+ * Scanner for Cloudflare WARP MASQUE endpoints. An IP only counts when the real TLS handshake
+ * (client certificate + ALPN h2) succeeds. When a WARP key exists, the CONNECT-IP stream is opened too.
+ *
+ * level 1 = TLS + h2 ok, level 2 = server announces extended CONNECT, level 3 = CONNECT-IP verified.
+ */
 object Scanner {
-    data class Res(val ip: String, val ms: Int, val h2: Boolean)
+    data class Res(val ip: String, val ms: Int, val mode: Int, val level: Int)
 
-    @Volatile var tested = 0
-    @Volatile var alive = 0
-    @Volatile var h2Count = 0
+    val tested = AtomicInteger(0)
+    val tcpOk = AtomicInteger(0)
+    val tlsOk = AtomicInteger(0)
+    val verified = AtomicInteger(0)
+    val errors = ConcurrentHashMap<String, AtomicInteger>()
     @Volatile var best: Res? = null
     @Volatile var stop = false
 
     private val results = ArrayList<Res>()
 
-    private fun candidates(): List<String> {
-        val l = ArrayList<String>()
-        for (p in 192..199) for (o in 1..254) l.add("162.159.$p.$o")
-        for (p in 96..99) for (o in 1..254) l.add("188.114.$p.$o")
-        l.shuffle()
-        return l
+    private fun candidates(c: Context): List<String> {
+        val set = LinkedHashSet<String>()
+        val e4 = Store.get(c, "reg_ep4")
+        if (e4.isNotEmpty()) set.add(e4)
+        set.add("162.159.198.2")
+        set.add("162.159.198.1")
+        set.add("162.159.192.1")
+        set.add("162.159.193.1")
+        val first = ArrayList<String>()
+        for (p in intArrayOf(198, 197, 195, 193, 192)) for (o in 1..254) first.add("162.159.$p.$o")
+        first.shuffle()
+        val second = ArrayList<String>()
+        for (p in 96..99) for (o in 1..254) second.add("188.114.$p.$o")
+        for (p in 68..69) for (o in 1..254) second.add("8.47.$p.$o")
+        second.shuffle()
+        set.addAll(first)
+        set.addAll(second)
+        return ArrayList(set)
     }
 
     private fun better(a: Res, b: Res?): Boolean {
         if (b == null) return true
-        if (a.h2 != b.h2) return a.h2
+        if (a.level != b.level) return a.level > b.level
         return a.ms < b.ms
     }
 
-    private fun probe(ip: String, ctx: SSLContext): Res? {
+    private fun err(e: Exception) {
+        val m = (e.message ?: "").lowercase()
+        val k = when {
+            e is SocketTimeoutException || m.contains("timed out") -> "timeout"
+            m.contains("reset") -> "reset"
+            m.contains("no-h2") -> "no-h2"
+            m.contains("closed") || m.contains("eof") || m.contains("end of stream") -> "closed"
+            m.contains("alert") || m.contains("handshake") || m.contains("ssl") -> "tls-error"
+            else -> e.javaClass.simpleName
+        }
+        errors.getOrPut(k) { AtomicInteger(0) }.incrementAndGet()
+    }
+
+    private fun probe(ip: String, ctx: SSLContext, registered: Boolean): Res? {
+        var ms = 0
         val s = Socket()
         try {
             val t0 = System.nanoTime()
             s.connect(InetSocketAddress(ip, 443), 2000)
-            val ms = ((System.nanoTime() - t0) / 1_000_000).toInt()
-            var h2 = false
-            try {
-                val ssl = ctx.socketFactory.createSocket(s, "consumer-masque.cloudflareclient.com", 443, true) as SSLSocket
-                val sp = ssl.sslParameters
-                sp.applicationProtocols = arrayOf("h2")
-                sp.setServerNames(listOf<SNIServerName>(SNIHostName("consumer-masque.cloudflareclient.com")))
-                ssl.sslParameters = sp
-                ssl.soTimeout = 3000
-                ssl.startHandshake()
-                h2 = ssl.applicationProtocol == "h2"
-            } catch (e: Exception) {
-            }
-            return Res(ip, ms, h2)
+            ms = ((System.nanoTime() - t0) / 1_000_000).toInt()
         } catch (e: Exception) {
             return null
         } finally {
@@ -64,42 +81,68 @@ object Scanner {
             } catch (e: Exception) {
             }
         }
+        tcpOk.incrementAndGet()
+
+        for (m in intArrayOf(1, 0)) {
+            if (stop) return null
+            var conn: Net.Conn? = null
+            try {
+                conn = Net.open(ip, 443, Net.SNI1, m, null, ctx, 3000, 4000)
+                tlsOk.incrementAndGet()
+                var level = 1
+                if (registered) {
+                    val st = Net.connectIp(conn)
+                    if (st == 0 || st in 200..299) level = 3
+                } else {
+                    if (Net.peekSettings(conn.ssl, 2500) == 2) level = 2
+                }
+                return Res(ip, ms, m, level)
+            } catch (e: Exception) {
+                err(e)
+            } finally {
+                conn?.close()
+            }
+        }
+        return null
     }
 
-    /** Blocks until the time is up, the list is exhausted or [stop] is set. Returns best results first. */
-    fun scan(durationSec: Int): List<Res> {
+    /** Blocks until time is up, the list is exhausted, enough verified endpoints exist, or [stop] is set. */
+    fun scan(c: Context, durationSec: Int): List<Res> {
         stop = false
-        tested = 0
-        alive = 0
-        h2Count = 0
+        tested.set(0)
+        tcpOk.set(0)
+        tlsOk.set(0)
+        verified.set(0)
+        errors.clear()
         best = null
         synchronized(results) { results.clear() }
-        val tm = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf<X509Certificate>()
-        }
-        val ctx = SSLContext.getInstance("TLS")
-        ctx.init(null, arrayOf<TrustManager>(tm), null)
 
-        val list = candidates()
+        val registered = Store.get(c, "addr4").isNotEmpty() || Store.get(c, "addr6").isNotEmpty()
+        val ctx: SSLContext = try {
+            KeyHelper.sslContext()
+        } catch (e: Exception) {
+            AetherVpnService.log("خطا در ساخت کلید: ${e.message}")
+            return emptyList()
+        }
+
+        val list = candidates(c)
         val idx = AtomicInteger(0)
         val deadline = System.currentTimeMillis() + durationSec * 1000L
         val workers = ArrayList<Thread>()
-        for (w in 0 until 24) {
+        for (w in 0 until 40) {
             val t = Thread {
                 while (!stop && System.currentTimeMillis() < deadline) {
                     val i = idx.getAndIncrement()
                     if (i >= list.size) break
-                    val r = probe(list[i], ctx)
-                    tested++
+                    val r = probe(list[i], ctx, registered)
+                    tested.incrementAndGet()
                     if (r != null) {
-                        alive++
-                        if (r.h2) h2Count++
+                        if (r.level == 3) verified.incrementAndGet()
                         synchronized(results) {
                             results.add(r)
                             if (better(r, best)) best = r
                         }
+                        if (verified.get() >= 6) stop = true
                     }
                 }
             }
@@ -112,7 +155,6 @@ object Scanner {
             } catch (e: Exception) {
             }
         }
-        val sorted = synchronized(results) { results.sortedWith(compareBy<Res>({ !it.h2 }, { it.ms })) }
-        return sorted
+        return synchronized(results) { results.sortedWith(compareBy<Res>({ -it.level }, { it.ms })) }
     }
 }
