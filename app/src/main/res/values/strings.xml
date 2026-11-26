@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Abulix BEASTMODE</string>
+    <string name="hint">کانفیگ WireGuard را اینجا بچسبانید</string>
+    <string name="connect">BEASTMODE ▶ اتصال</string>
+    <string name="disconnect">قطع اتصال</string>
+    <string name="st_off">قطع</string>
+    <string name="st_on">متصل ✓</string>
+</resources>
