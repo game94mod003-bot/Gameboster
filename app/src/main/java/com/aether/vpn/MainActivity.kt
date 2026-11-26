@@ -25,15 +25,19 @@ import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
     private val h = Handler(Looper.getMainLooper())
-    private val cBg = Color.parseColor("#0B0F1A")
-    private val cCard = Color.parseColor("#151B2B")
+    private val cBg = Color.parseColor("#0A0E1A")
+    private val cCard = Color.parseColor("#141A2B")
+    private val cCard2 = Color.parseColor("#1D2540")
     private val cAccent = Color.parseColor("#00E5A8")
     private val cRed = Color.parseColor("#FF5C7A")
     private val cYellow = Color.parseColor("#FFC857")
     private val cText = Color.parseColor("#E8ECF6")
     private val cSub = Color.parseColor("#8A94AD")
 
-    private lateinit var dot: View
+    private val durations = intArrayOf(1, 2, 5, 10, 30, 60)
+
+    private lateinit var ring: GradientDrawable
+    private lateinit var btnConn: TextView
     private lateinit var tvState: TextView
     private lateinit var tvTime: TextView
     private lateinit var tvPing: TextView
@@ -44,12 +48,15 @@ class MainActivity : Activity() {
     private lateinit var tvIp: TextView
     private lateinit var tvIpInfo: TextView
     private lateinit var tvCfg: TextView
+    private lateinit var tvScan: TextView
     private lateinit var tvLog: TextView
     private lateinit var btnScan: Button
     private lateinit var btnKey: Button
-    private lateinit var btnConn: Button
+    private val chips = ArrayList<TextView>()
 
-    private var scanning = false
+    @Volatile private var scanning = false
+    private var scanStart = 0L
+    private var scanDur = 60
     private var gettingKey = false
     private var lastRx = 0L
     private var lastTx = 0L
@@ -73,7 +80,7 @@ class MainActivity : Activity() {
         l.setPadding(dp(16), dp(14), dp(16), dp(14))
         val g = GradientDrawable()
         g.setColor(cCard)
-        g.cornerRadius = dp(18).toFloat()
+        g.cornerRadius = dp(20).toFloat()
         l.background = g
         val lp = LinearLayout.LayoutParams(-1, -2)
         lp.bottomMargin = dp(12)
@@ -91,7 +98,7 @@ class MainActivity : Activity() {
         g.setColor(color)
         g.cornerRadius = dp(16).toFloat()
         b.background = g
-        val lp = LinearLayout.LayoutParams(-1, dp(54))
+        val lp = LinearLayout.LayoutParams(-1, dp(52))
         lp.bottomMargin = dp(10)
         b.layoutParams = lp
         return b
@@ -110,14 +117,26 @@ class MainActivity : Activity() {
         return col
     }
 
+    private fun styleChips() {
+        for (i in chips.indices) {
+            val sel = durations[i] == scanDur / 60
+            val g = GradientDrawable()
+            g.cornerRadius = dp(12).toFloat()
+            g.setColor(if (sel) cAccent else cCard2)
+            chips[i].background = g
+            chips[i].setTextColor(if (sel) cBg else cText)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = cBg
         window.navigationBarColor = cBg
+        scanDur = (Store.get(this, "scan_min", "5").toIntOrNull() ?: 5) * 60
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setPadding(dp(16), dp(20), dp(16), dp(24))
+        root.setPadding(dp(16), dp(18), dp(16), dp(24))
 
         val sv = ScrollView(this)
         sv.setBackgroundColor(cBg)
@@ -126,31 +145,38 @@ class MainActivity : Activity() {
         sv.addView(root)
         setContentView(sv)
 
-        root.addView(tv("Aether", 32f, cAccent, true))
-        val sub = tv("MASQUE · HTTP/2 · IPv4 + IPv6", 13f, cSub)
-        (sub.layoutParams as? LinearLayout.LayoutParams)?.bottomMargin = dp(16)
+        // header
+        val title = tv("Aether", 30f, cAccent, true)
+        title.gravity = Gravity.CENTER
+        root.addView(title)
+        val sub = tv("MASQUE · HTTP/2 · IPv4 + IPv6", 12f, cSub)
+        sub.gravity = Gravity.CENTER
         root.addView(sub)
 
-        // status card
-        val c1 = card()
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.CENTER_VERTICAL
-        dot = View(this)
-        val dg = GradientDrawable()
-        dg.shape = GradientDrawable.OVAL
-        dg.setColor(cSub)
-        dot.background = dg
-        dot.layoutParams = LinearLayout.LayoutParams(dp(14), dp(14))
-        row.addView(dot)
-        tvState = tv("قطع", 20f, cText, true)
-        tvState.setPadding(dp(10), 0, 0, 0)
-        tvState.layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-        row.addView(tvState)
-        tvTime = tv("00:00:00", 16f, cSub)
-        row.addView(tvTime)
-        c1.addView(row)
-        root.addView(c1)
+        // big connect button
+        ring = GradientDrawable()
+        ring.shape = GradientDrawable.OVAL
+        ring.setColor(cCard)
+        ring.setStroke(dp(5), cSub)
+        btnConn = tv("اتصال", 22f, cText, true)
+        btnConn.gravity = Gravity.CENTER
+        btnConn.background = ring
+        val blp = LinearLayout.LayoutParams(dp(150), dp(150))
+        blp.gravity = Gravity.CENTER_HORIZONTAL
+        blp.topMargin = dp(18)
+        blp.bottomMargin = dp(10)
+        btnConn.layoutParams = blp
+        root.addView(btnConn)
+
+        tvState = tv("قطع", 18f, cText, true)
+        tvState.gravity = Gravity.CENTER
+        root.addView(tvState)
+        tvTime = tv("00:00:00", 15f, cSub)
+        tvTime.gravity = Gravity.CENTER
+        val tlp = LinearLayout.LayoutParams(-1, -2)
+        tlp.bottomMargin = dp(16)
+        tvTime.layoutParams = tlp
+        root.addView(tvTime)
 
         // metrics
         val c2 = card()
@@ -180,8 +206,9 @@ class MainActivity : Activity() {
 
         // exit ip
         val c4 = card()
-        c4.addView(tv("IP خروجی", 12f, cSub))
+        c4.addView(tv("IP خروجی (برای تازه‌سازی لمس کنید)", 12f, cSub))
         tvIp = tv("—", 22f, cText, true)
+        tvIp.layoutDirection = View.LAYOUT_DIRECTION_LTR
         c4.addView(tvIp)
         tvIpInfo = tv("", 12f, cSub)
         c4.addView(tvIpInfo)
@@ -190,26 +217,58 @@ class MainActivity : Activity() {
         }
         root.addView(c4)
 
-        // config
+        // scan section
         val c5 = card()
-        c5.addView(tv("کانفیگ", 12f, cSub))
-        tvCfg = tv("—", 13f, cText)
-        c5.addView(tvCfg)
+        c5.addView(tv("مدت اسکن", 12f, cSub))
+        val crow = LinearLayout(this)
+        crow.orientation = LinearLayout.HORIZONTAL
+        val clp = LinearLayout.LayoutParams(-1, -2)
+        clp.topMargin = dp(8)
+        clp.bottomMargin = dp(10)
+        crow.layoutParams = clp
+        for (m in durations) {
+            val chip = tv(if (m == 60) "۱ ساعت" else "$m دقیقه", 12f, cText)
+            chip.gravity = Gravity.CENTER
+            chip.setPadding(dp(4), dp(10), dp(4), dp(10))
+            val lp = LinearLayout.LayoutParams(0, -2, 1f)
+            lp.leftMargin = dp(3)
+            lp.rightMargin = dp(3)
+            chip.layoutParams = lp
+            chip.setOnClickListener {
+                if (!scanning) {
+                    scanDur = m * 60
+                    Store.put(this, "scan_min", m.toString())
+                    styleChips()
+                }
+            }
+            chips.add(chip)
+            crow.addView(chip)
+        }
+        c5.addView(crow)
+        styleChips()
+        tvScan = tv("", 13f, cText)
+        tvScan.layoutDirection = View.LAYOUT_DIRECTION_RTL
+        c5.addView(tvScan)
         root.addView(c5)
 
-        btnScan = button("اسکن", cCard, cText)
-        btnKey = button("دریافت کلید WARP", cCard, cText)
-        btnConn = button("اتصال", cAccent, cBg)
+        // config
+        val c6 = card()
+        c6.addView(tv("کانفیگ", 12f, cSub))
+        tvCfg = tv("—", 13f, cText)
+        c6.addView(tvCfg)
+        root.addView(c6)
+
+        btnScan = button("شروع اسکن", cCard2, cText)
+        btnKey = button("دریافت کلید WARP", cCard2, cText)
         root.addView(btnScan)
         root.addView(btnKey)
-        root.addView(btnConn)
 
-        val c6 = card()
+        val c7 = card()
         tvLog = tv("", 11f, cSub)
         tvLog.typeface = Typeface.MONOSPACE
         tvLog.layoutDirection = View.LAYOUT_DIRECTION_LTR
-        c6.addView(tvLog)
-        root.addView(c6)
+        c7.addView(tvLog)
+        root.addView(c7)
 
         btnScan.setOnClickListener { doScan() }
         btnKey.setOnClickListener { doKey() }
@@ -237,30 +296,31 @@ class MainActivity : Activity() {
     }
 
     private fun doScan() {
-        if (scanning) return
+        if (scanning) {
+            Scanner.stop = true
+            return
+        }
         if (busyVpn()) {
             toast("اول اتصال را قطع کنید")
             return
         }
         scanning = true
-        btnScan.isEnabled = false
+        scanStart = SystemClock.elapsedRealtime()
+        val dur = scanDur
         thread {
-            AetherVpnService.log("شروع اسکن...")
-            val res = Scanner.scan(48) { d, t -> h.post { btnScan.text = "اسکن... $d/$t" } }
+            AetherVpnService.log("شروع اسکن (${dur / 60} دقیقه)")
+            val res = Scanner.scan(dur)
             if (res.isEmpty()) {
-                AetherVpnService.log("هیچ آی‌پی پاسخ نداد")
+                AetherVpnService.log("هیچ آی‌پی پاسخ نداد؛ اینترنت یا فیلترشکن دیگر را بررسی کنید")
             } else {
-                val best = res[0]
-                Store.put(this, "ep_host", best.ip)
+                val top = res.take(8)
+                Store.put(this, "ep_host", top[0].ip)
                 Store.put(this, "ep_port", "443")
-                Store.put(this, "ep_ms", best.ms.toString())
-                AetherVpnService.log("بهترین: ${best.ip} (${best.ms}ms) از ${res.size} آی‌پی سالم")
+                Store.put(this, "ep_ms", top[0].ms.toString())
+                Store.put(this, "ep_list", top.joinToString(",") { it.ip })
+                AetherVpnService.log("بهترین: ${top[0].ip} (${top[0].ms}ms) | ${Scanner.tested} تست، ${Scanner.alive} سالم، ${Scanner.h2Count} h2")
             }
-            h.post {
-                btnScan.text = "اسکن"
-                btnScan.isEnabled = true
-                scanning = false
-            }
+            scanning = false
         }
     }
 
@@ -287,6 +347,10 @@ class MainActivity : Activity() {
     private fun toggle() {
         if (busyVpn()) {
             startService(Intent(this, AetherVpnService::class.java).setAction(AetherVpnService.ACTION_STOP))
+            return
+        }
+        if (scanning) {
+            toast("اسکن در حال انجام است")
             return
         }
         if (Store.get(this, "ep_host").isEmpty()) {
@@ -320,8 +384,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setDot(color: Int) {
-        (dot.background as? GradientDrawable)?.setColor(color)
+    private fun mmss(sec: Long): String = String.format(Locale.US, "%02d:%02d", sec / 60, sec % 60)
+
+    private fun setRing(color: Int) {
+        ring.setStroke(dp(5), color)
     }
 
     private fun update() {
@@ -329,34 +395,38 @@ class MainActivity : Activity() {
         val st = AetherVpnService.state
         when (st) {
             "connected" -> {
-                setDot(cAccent)
+                setRing(cAccent)
+                btnConn.text = "قطع"
+                btnConn.setTextColor(cAccent)
                 tvState.text = "متصل"
                 tvState.setTextColor(cAccent)
             }
             "connecting" -> {
-                setDot(cYellow)
-                dot.alpha = if (tick % 2 == 0) 0.3f else 1f
+                setRing(if (tick % 2 == 0) cYellow else cCard2)
+                btnConn.text = "..."
+                btnConn.setTextColor(cYellow)
                 tvState.text = "در حال اتصال..."
                 tvState.setTextColor(cYellow)
             }
             "error" -> {
-                setDot(cRed)
+                setRing(cRed)
+                btnConn.text = "اتصال"
+                btnConn.setTextColor(cText)
                 tvState.text = AetherVpnService.message.ifEmpty { "خطا" }
                 tvState.setTextColor(cRed)
             }
             else -> {
-                setDot(cSub)
+                setRing(cSub)
+                btnConn.text = "اتصال"
+                btnConn.setTextColor(cText)
                 tvState.text = if (AetherVpnService.message.isEmpty()) "قطع" else AetherVpnService.message
                 tvState.setTextColor(cText)
             }
         }
-        if (st != "connecting") dot.alpha = 1f
-        btnConn.text = if (busyVpn()) "قطع اتصال" else "اتصال"
 
         if (st == "connected") {
             val s = (System.currentTimeMillis() - AetherVpnService.connectedAt) / 1000
             tvTime.text = String.format(Locale.US, "%02d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
-
             val now = SystemClock.elapsedRealtime()
             val dt = (now - lastT).coerceAtLeast(1) / 1000.0
             val rx = AetherVpnService.rx
@@ -366,7 +436,6 @@ class MainActivity : Activity() {
             lastRx = rx
             lastTx = tx
             lastT = now
-
             val r = AetherVpnService.rtt
             tvPing.text = if (r >= 0) "$r ms" else "—"
             val sb = AetherVpnService.stability
@@ -397,10 +466,26 @@ class MainActivity : Activity() {
             lastT = SystemClock.elapsedRealtime()
         }
 
+        // scan status
+        if (scanning) {
+            val el = (SystemClock.elapsedRealtime() - scanStart) / 1000
+            val b = Scanner.best
+            tvScan.text = "در حال اسکن ${mmss(el)} / ${mmss(scanDur.toLong())}" +
+                "\nتست‌شده: ${Scanner.tested} | سالم: ${Scanner.alive} | h2: ${Scanner.h2Count}" +
+                (if (b != null) "\nبهترین تا الان: ${b.ip} (${b.ms}ms)" else "")
+            btnScan.text = "توقف اسکن"
+        } else {
+            btnScan.text = "شروع اسکن"
+            if (Scanner.tested > 0 && tvScan.text.isEmpty()) tvScan.text = ""
+            if (!scanning && tvScan.text.startsWith("در حال")) tvScan.text = "اسکن تمام شد"
+        }
+
         val host = Store.get(this, "ep_host")
         val a4 = Store.get(this, "addr4")
         val a6 = Store.get(this, "addr6")
-        tvCfg.text = "Endpoint: " + (if (host.isEmpty()) "— (اسکن نشده)" else "$host:${Store.get(this, "ep_port", "443")}") +
+        val ms = Store.get(this, "ep_ms")
+        tvCfg.text = "Endpoint: " +
+            (if (host.isEmpty()) "— (اسکن نشده)" else "$host:${Store.get(this, "ep_port", "443")}" + (if (ms.isNotEmpty()) " (${ms}ms)" else "")) +
             "\nپروتکل: MASQUE (CONNECT-IP) روی HTTP/2" +
             "\nIPv4 تونل: " + (if (a4.isEmpty()) "—" else a4) +
             "\nIPv6 تونل: " + (if (a6.isEmpty()) "—" else a6)

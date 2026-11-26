@@ -168,60 +168,98 @@ class AetherVpnService : VpnService() {
         super.onDestroy()
     }
 
+    private fun closeQuiet() {
+        try {
+            conn?.close("retry")
+        } catch (e: Exception) {
+        }
+        try {
+            rawSock?.close()
+        } catch (e: Exception) {
+        }
+        conn = null
+        rawSock = null
+    }
+
+    /** Opens TCP + TLS(h2) + CONNECT-IP to one endpoint. Throws on any failure. */
+    private fun openTunnel(host: String, port: Int): Http2Conn {
+        log("اتصال به $host:$port")
+        val raw = Socket()
+        rawSock = raw
+        raw.bind(InetSocketAddress(0))          // forces the socket fd to exist so protect() works
+        if (!protect(raw)) throw Exception("protect ناموفق بود (سوکت)")
+        raw.tcpNoDelay = true
+        raw.connect(InetSocketAddress(host, port), 6000)
+
+        val ssl = KeyHelper.sslContext().socketFactory.createSocket(raw, sni, port, true) as SSLSocket
+        val sp = ssl.sslParameters
+        sp.applicationProtocols = arrayOf("h2")
+        sp.setServerNames(listOf<SNIServerName>(SNIHostName(sni)))
+        ssl.sslParameters = sp
+        ssl.soTimeout = 8000
+        ssl.startHandshake()
+        val alpn = ssl.applicationProtocol
+        if (alpn != "h2") throw Exception("سرور HTTP/2 را نپذیرفت (alpn=$alpn)")
+        ssl.soTimeout = 0
+
+        val c = Http2Conn(ssl)
+        conn = c
+        c.onPacket = { b, o, l ->
+            try {
+                tunOut?.write(b, o, l)
+                rx += l
+            } catch (e: Exception) {
+            }
+        }
+        c.onPong = { r ->
+            lastRtt = r
+            pongs++
+        }
+        c.start()
+        thread { c.runReader() }
+        c.sendConnect(
+            "cloudflareaccess.com", "cf-connect-ip",
+            listOf("user-agent" to "WARP for Android", "capsule-protocol" to "?1")
+        )
+        val st = c.awaitStatus(8000)
+        if (st == -1) throw Exception("پاسخی از سرور نیامد")
+        if (st == -2) throw Exception("سرور اتصال را بست: ${c.closeReason}")
+        if (st != 0 && st !in 200..299) throw Exception("سرور خطا داد: HTTP $st")
+        log("تونل MASQUE باز شد (status=$st)")
+        return c
+    }
+
     private fun runSession() {
         try {
-            val host = Store.get(this, "ep_host")
-            val port = Store.get(this, "ep_port", "443").toIntOrNull() ?: 443
             val a4 = Store.get(this, "addr4")
             val a6 = Store.get(this, "addr6")
-            if (host.isEmpty()) throw Exception("کانفیگ ندارید؛ ابتدا اسکن کنید")
             if (a4.isEmpty() && a6.isEmpty()) throw Exception("کلید WARP ندارید؛ ابتدا دریافت کنید")
+            val port = Store.get(this, "ep_port", "443").toIntOrNull() ?: 443
+            val hosts = ArrayList<String>()
+            val first = Store.get(this, "ep_host")
+            if (first.isNotEmpty()) hosts.add(first)
+            for (x in Store.get(this, "ep_list").split(",")) {
+                if (x.isNotEmpty() && !hosts.contains(x)) hosts.add(x)
+            }
+            val e4 = Store.get(this, "reg_ep4")
+            if (e4.isNotEmpty() && !hosts.contains(e4)) hosts.add(e4)
+            if (hosts.isEmpty()) throw Exception("کانفیگ ندارید؛ ابتدا اسکن کنید")
 
-            log("اتصال TCP به $host:$port")
-            val raw = Socket()
-            rawSock = raw
-            if (!protect(raw)) throw Exception("protect ناموفق بود")
-            raw.tcpNoDelay = true
-            raw.connect(InetSocketAddress(host, port), 8000)
-            if (!running) return
-
-            log("TLS + ALPN h2")
-            val ssl = KeyHelper.sslContext().socketFactory.createSocket(raw, sni, port, true) as SSLSocket
-            val sp = ssl.sslParameters
-            sp.applicationProtocols = arrayOf("h2")
-            sp.setServerNames(listOf<SNIServerName>(SNIHostName(sni)))
-            ssl.sslParameters = sp
-            ssl.soTimeout = 10000
-            ssl.startHandshake()
-            val alpn = ssl.applicationProtocol
-            if (alpn != "h2") throw Exception("سرور HTTP/2 را نپذیرفت (alpn=$alpn)")
-            ssl.soTimeout = 0
-            log("HTTP/2 برقرار شد، درخواست CONNECT-IP")
-
-            val c = Http2Conn(ssl)
-            conn = c
-            c.onPacket = { b, o, l ->
+            var found: Http2Conn? = null
+            var lastErr = "ناموفق"
+            for (host in hosts.take(6)) {
+                if (!running) return
                 try {
-                    tunOut?.write(b, o, l)
-                    rx += l
+                    found = openTunnel(host, port)
+                    break
                 } catch (e: Exception) {
+                    lastErr = e.message ?: "خطا"
+                    log("$host ناموفق: $lastErr")
+                    closeQuiet()
                 }
             }
-            c.onPong = { r ->
-                lastRtt = r
-                pongs++
-            }
-            c.start()
-            thread { c.runReader() }
-            c.sendConnect(
-                "cloudflareaccess.com", "cf-connect-ip",
-                listOf("user-agent" to "WARP for Android", "capsule-protocol" to "?1")
-            )
-            val st = c.awaitStatus(10000)
-            if (st == -1) throw Exception("پاسخی از سرور نیامد")
-            if (st == -2) throw Exception("سرور اتصال را بست: ${c.closeReason}")
-            if (st != 0 && st !in 200..299) throw Exception("سرور خطا داد: HTTP $st")
-            log("تونل MASQUE باز شد (status=$st)")
+            val c: Http2Conn = found ?: throw Exception(lastErr)
+            if (!running) return
 
             val b = Builder()
             b.setSession("Aether")
