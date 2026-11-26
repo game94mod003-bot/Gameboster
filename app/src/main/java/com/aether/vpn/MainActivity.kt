@@ -15,6 +15,7 @@ import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -34,7 +35,7 @@ class MainActivity : Activity() {
     private val cText = Color.parseColor("#E8ECF6")
     private val cSub = Color.parseColor("#8A94AD")
 
-    private val durations = intArrayOf(1, 2, 5, 10, 30, 60)
+    private val durations = intArrayOf(30, 60, 120, 300, 600, 1800)
 
     private lateinit var ring: GradientDrawable
     private lateinit var btnConn: TextView
@@ -53,10 +54,13 @@ class MainActivity : Activity() {
     private lateinit var btnScan: Button
     private lateinit var btnKey: Button
     private val chips = ArrayList<TextView>()
+    private lateinit var etLink: EditText
+    private var fontR: Typeface? = null
+    private var fontB: Typeface? = null
 
     @Volatile private var scanning = false
     private var scanStart = 0L
-    private var scanDur = 60
+    private var scanDur = 30
     private var gettingKey = false
     private var lastRx = 0L
     private var lastTx = 0L
@@ -80,7 +84,8 @@ class MainActivity : Activity() {
         l.setPadding(dp(16), dp(14), dp(16), dp(14))
         val g = GradientDrawable()
         g.setColor(cCard)
-        g.cornerRadius = dp(20).toFloat()
+        g.cornerRadius = dp(22).toFloat()
+        g.setStroke(dp(1), Color.parseColor("#26304F"))
         l.background = g
         val lp = LinearLayout.LayoutParams(-1, -2)
         lp.bottomMargin = dp(12)
@@ -119,7 +124,7 @@ class MainActivity : Activity() {
 
     private fun styleChips() {
         for (i in chips.indices) {
-            val sel = durations[i] == scanDur / 60
+            val sel = durations[i] == scanDur
             val g = GradientDrawable()
             g.cornerRadius = dp(12).toFloat()
             g.setColor(if (sel) cAccent else cCard2)
@@ -132,14 +137,26 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = cBg
         window.navigationBarColor = cBg
-        scanDur = (Store.get(this, "scan_min", "5").toIntOrNull() ?: 5) * 60
+        scanDur = Store.get(this, "scan_sec", "30").toIntOrNull() ?: 30
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setPadding(dp(16), dp(18), dp(16), dp(24))
 
         val sv = ScrollView(this)
-        sv.setBackgroundColor(cBg)
+        val bgG = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.parseColor("#060A14"), Color.parseColor("#0F1838"), Color.parseColor("#0A0E1A")))
+        sv.background = bgG
+        try {
+            fontR = Typeface.createFromAsset(assets, "fonts/vazir.ttf")
+            fontB = try {
+                Typeface.createFromAsset(assets, "fonts/vazir-bold.ttf")
+            } catch (e: Exception) {
+                fontR
+            }
+        } catch (e: Exception) {
+            fontR = null
+            fontB = null
+        }
         sv.fitsSystemWindows = true
         sv.layoutDirection = View.LAYOUT_DIRECTION_RTL
         sv.addView(root)
@@ -148,6 +165,7 @@ class MainActivity : Activity() {
         // header
         val title = tv("Aether", 30f, cAccent, true)
         title.gravity = Gravity.CENTER
+        title.letterSpacing = 0.15f
         root.addView(title)
         val sub = tv("MASQUE · HTTP/2 · IPv4 + IPv6", 12f, cSub)
         sub.gravity = Gravity.CENTER
@@ -227,7 +245,7 @@ class MainActivity : Activity() {
         clp.bottomMargin = dp(10)
         crow.layoutParams = clp
         for (m in durations) {
-            val chip = tv(if (m == 60) "۱ ساعت" else "$m دقیقه", 12f, cText)
+            val chip = tv(if (m < 60) "$m ثانیه" else "${m / 60} دقیقه", 12f, cText)
             chip.gravity = Gravity.CENTER
             chip.setPadding(dp(4), dp(10), dp(4), dp(10))
             val lp = LinearLayout.LayoutParams(0, -2, 1f)
@@ -236,8 +254,8 @@ class MainActivity : Activity() {
             chip.layoutParams = lp
             chip.setOnClickListener {
                 if (!scanning) {
-                    scanDur = m * 60
-                    Store.put(this, "scan_min", m.toString())
+                    scanDur = m
+                    Store.put(this, "scan_sec", m.toString())
                     styleChips()
                 }
             }
@@ -257,6 +275,22 @@ class MainActivity : Activity() {
         tvCfg = tv("—", 13f, cText)
         c6.addView(tvCfg)
         root.addView(c6)
+
+        // import aether:// link
+        val c8 = card()
+        c8.addView(tv("ورود لینک aether://", 12f, cSub))
+        etLink = EditText(this)
+        etLink.hint = "aether://?protocol=mim&outer=...&inner=..."
+        etLink.setHintTextColor(cSub)
+        etLink.setTextColor(cText)
+        etLink.textSize = 12f
+        etLink.setSingleLine(true)
+        etLink.layoutDirection = View.LAYOUT_DIRECTION_LTR
+        c8.addView(etLink)
+        val btnLink = button("ورود لینک", cCard2, cAccent)
+        btnLink.setOnClickListener { importLink(etLink.text.toString().trim()) }
+        c8.addView(btnLink)
+        root.addView(c8)
 
         btnScan = button("شروع اسکن", cCard2, cText)
         btnKey = button("دریافت کلید WARP", cCard2, cText)
@@ -283,6 +317,7 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
         }
+        applyFont(sv)
         lastT = SystemClock.elapsedRealtime()
         h.post(object : Runnable {
             override fun run() {
@@ -290,6 +325,46 @@ class MainActivity : Activity() {
                 h.postDelayed(this, 500)
             }
         })
+    }
+
+    private fun applyFont(v: View) {
+        if (v is TextView) {
+            val bold = v.typeface?.isBold == true
+            val f = if (bold) fontB else fontR
+            if (f != null && v.typeface != Typeface.MONOSPACE) v.typeface = f
+        }
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) applyFont(v.getChildAt(i))
+        }
+    }
+
+    private fun splitHp(x: String): Pair<String, String> {
+        val i = x.lastIndexOf(':')
+        return if (i > 0) Pair(x.substring(0, i), x.substring(i + 1)) else Pair(x, "443")
+    }
+
+    private fun importLink(link: String) {
+        try {
+            val u = android.net.Uri.parse(link)
+            val outer = u.getQueryParameter("outer") ?: ""
+            val inner = u.getQueryParameter("inner") ?: ""
+            if (u.scheme != "aether" || (outer.isEmpty() && inner.isEmpty())) {
+                toast("لینک معتبر نیست")
+                return
+            }
+            if (outer.isNotEmpty()) {
+                val o = splitHp(outer)
+                Store.put(this, "imp_outer", o.first)
+                Store.put(this, "ep_host", o.first)
+                Store.put(this, "ep_port", o.second)
+            }
+            if (inner.isNotEmpty()) Store.put(this, "imp_inner", splitHp(inner).first)
+            AetherVpnService.log("لینک وارد شد: outer=$outer inner=$inner")
+            AetherVpnService.log("نکته: MASQUE×2 پیاده نشده؛ این دو آی‌پی به‌صورت تک‌هاپ امتحان می‌شوند")
+            toast("لینک وارد شد")
+        } catch (e: Exception) {
+            toast("لینک معتبر نیست")
+        }
     }
 
     private fun toast(m: String) {
@@ -319,7 +394,8 @@ class MainActivity : Activity() {
                     AetherVpnService.log("ابتدا کلید WARP گرفته می‌شود...")
                     WarpApi.register(this) { AetherVpnService.log(it) }
                 }
-                AetherVpnService.log("شروع اسکن (${dur / 60} دقیقه)")
+                WarpApi.ensureEnabled(this) { AetherVpnService.log(it) }
+                AetherVpnService.log("شروع اسکن (${dur} ثانیه)")
                 val res = Scanner.scan(this, dur)
                 val stat = "${Scanner.tested.get()} تست | TCP: ${Scanner.tcpOk.get()} | TLS+h2: ${Scanner.tlsOk.get()} | تاییدشده: ${Scanner.verified.get()}"
                 val errs = Scanner.errors.entries.sortedByDescending { it.value.get() }.take(3)
@@ -335,7 +411,7 @@ class MainActivity : Activity() {
                     Store.put(this, "ep_port", "443")
                     Store.put(this, "ep_ms", top[0].ms.toString())
                     Store.put(this, "ep_level", top[0].level.toString())
-                    Store.put(this, "ep_list", top.joinToString(",") { "${it.ip}@${it.mode}" })
+                    Store.put(this, "ep_list", top.joinToString(",") { "${it.ip}@${it.mode}@${it.sni}" })
                     AetherVpnService.log("بهترین: ${top[0].ip} (${top[0].ms}ms، سطح ${top[0].level}) | $stat")
                 }
             } catch (e: Exception) {
@@ -416,6 +492,7 @@ class MainActivity : Activity() {
         val st = AetherVpnService.state
         when (st) {
             "connected" -> {
+                btnConn.animate().scaleX(1f).scaleY(1f).setDuration(200).start()
                 setRing(cAccent)
                 btnConn.text = "قطع"
                 btnConn.setTextColor(cAccent)
@@ -424,6 +501,8 @@ class MainActivity : Activity() {
             }
             "connecting" -> {
                 setRing(if (tick % 2 == 0) cYellow else cCard2)
+                val sc = if (tick % 2 == 0) 1.07f else 1f
+                btnConn.animate().scaleX(sc).scaleY(sc).setDuration(450).start()
                 btnConn.text = "..."
                 btnConn.setTextColor(cYellow)
                 tvState.text = "در حال اتصال..."

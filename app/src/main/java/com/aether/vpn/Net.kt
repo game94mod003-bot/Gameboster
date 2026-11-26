@@ -84,11 +84,11 @@ class Relay(
                 first = false
                 var p = 0
                 while (p < n) {
-                    val sz = minOf(n - p, 4 + rnd.nextInt(28))
+                    val sz = minOf(n - p, 8 + rnd.nextInt(9))
                     o.write(buf, p, sz)
                     o.flush()
                     p += sz
-                    if (p < n) Thread.sleep(1L + rnd.nextInt(3))
+                    if (p < n) Thread.sleep(5L + rnd.nextInt(11))
                 }
             } else {
                 first = false
@@ -117,8 +117,11 @@ class Relay(
 }
 
 object Net {
+    const val SNI0 = "www.cloudflare.com"
     const val SNI1 = "consumer-masque.cloudflareclient.com"
     const val SNI2 = "consumer-masque-proxy.cloudflareclient.com"
+
+    val SNIS = arrayOf(SNI0, SNI1, SNI2)
 
     private val PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".toByteArray(Charsets.US_ASCII)
 

@@ -119,9 +119,41 @@ object WarpApi {
         }
     }
 
+    /** Registration is two requests (like the app): register, then enable WARP on the device. */
     fun register(ctx: Context, log: (String) -> Unit): Boolean {
+        if (!registerOnly(ctx, log)) return false
+        enableWarp(ctx, log)
+        return true
+    }
+
+    /** Turns WARP on for the registered device; without it the edge resets the tunnel stream (RST_STREAM). */
+    fun enableWarp(ctx: Context, log: (String) -> Unit): Boolean {
+        val id = Store.get(ctx, "reg_id")
+        val token = Store.get(ctx, "reg_token")
+        if (id.isEmpty() || token.isEmpty()) return false
+        return try {
+            val r = raw("PATCH", "$BASE/$id", JSONObject().put("warp_enabled", true).toString(), token)
+            log("فعال‌سازی WARP: HTTP ${r.first}")
+            if (r.first in 200..299) {
+                Store.put(ctx, "warp_en", "1")
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            log("خطا در فعال‌سازی WARP: ${e.message}")
+            false
+        }
+    }
+
+    fun ensureEnabled(ctx: Context, log: (String) -> Unit) {
+        if (Store.get(ctx, "warp_en") != "1") enableWarp(ctx, log)
+    }
+
+    private fun registerOnly(ctx: Context, log: (String) -> Unit): Boolean {
         try {
             KeyHelper.regenerate()
+            Store.put(ctx, "warp_en", "")
             val pub = Base64.encodeToString(KeyHelper.publicKeyDer(), Base64.NO_WRAP)
             val df = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
             df.timeZone = TimeZone.getTimeZone("UTC")

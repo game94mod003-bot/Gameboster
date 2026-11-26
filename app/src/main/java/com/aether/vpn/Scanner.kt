@@ -15,7 +15,7 @@ import javax.net.ssl.SSLContext
  * level 1 = TLS + h2 ok, level 2 = server announces extended CONNECT, level 3 = CONNECT-IP verified.
  */
 object Scanner {
-    data class Res(val ip: String, val ms: Int, val mode: Int, val level: Int)
+    data class Res(val ip: String, val ms: Int, val mode: Int, val sni: Int, val level: Int)
 
     val tested = AtomicInteger(0)
     val tcpOk = AtomicInteger(0)
@@ -29,6 +29,10 @@ object Scanner {
 
     private fun candidates(c: Context): List<String> {
         val set = LinkedHashSet<String>()
+        val io = Store.get(c, "imp_outer")
+        val ii = Store.get(c, "imp_inner")
+        if (io.isNotEmpty()) set.add(io)
+        if (ii.isNotEmpty()) set.add(ii)
         val e4 = Store.get(c, "reg_ep4")
         if (e4.isNotEmpty()) set.add(e4)
         set.add("162.159.198.2")
@@ -83,24 +87,30 @@ object Scanner {
         }
         tcpOk.incrementAndGet()
 
-        for (m in intArrayOf(1, 0)) {
-            if (stop) return null
-            var conn: Net.Conn? = null
-            try {
-                conn = Net.open(ip, 443, Net.SNI1, m, null, ctx, 3000, 4000)
-                tlsOk.incrementAndGet()
-                var level = 1
-                if (registered) {
-                    val st = Net.connectIp(conn)
-                    if (st == 0 || st in 200..299) level = 3
-                } else {
-                    if (Net.peekSettings(conn.ssl, 2500) == 2) level = 2
+        for (si in intArrayOf(0, 1)) {
+            for (m in intArrayOf(1, 0)) {
+                if (stop) return null
+                var conn: Net.Conn? = null
+                try {
+                    conn = Net.open(ip, 443, Net.SNIS[si], m, null, ctx, 3000, 4000)
+                    tlsOk.incrementAndGet()
+                    var level = 1
+                    if (registered) {
+                        val st = Net.connectIp(conn)
+                        if (st == 0 || st in 200..299) {
+                            level = 3
+                        } else {
+                            errors.getOrPut("connect:$st") { AtomicInteger(0) }.incrementAndGet()
+                        }
+                    } else {
+                        if (Net.peekSettings(conn.ssl, 2500) == 2) level = 2
+                    }
+                    return Res(ip, ms, m, si, level)
+                } catch (e: Exception) {
+                    err(e)
+                } finally {
+                    conn?.close()
                 }
-                return Res(ip, ms, m, level)
-            } catch (e: Exception) {
-                err(e)
-            } finally {
-                conn?.close()
             }
         }
         return null

@@ -183,7 +183,7 @@ class AetherVpnService : VpnService() {
 
     /** Opens TCP + TLS(h2) + CONNECT-IP to one endpoint. Throws on any failure. */
     private fun openTunnel(host: String, port: Int, mode: Int, sni: String): Http2Conn {
-        log("اتصال به $host:$port (${if (mode == 1) "frag" else "direct"})")
+        log("اتصال به $host:$port (${if (mode == 1) "frag" else "direct"} | $sni)")
         val nc = Net.open(host, port, sni, mode, { s -> protect(s) }, KeyHelper.sslContext(), 4000, 5000)
         netConn = nc
         val ssl = nc.ssl
@@ -225,29 +225,43 @@ class AetherVpnService : VpnService() {
             fun add(h: String, m: Int, sni: String) {
                 if (h.isNotEmpty() && atts.none { it.host == h && it.mode == m && it.sni == sni }) atts.add(Att(h, m, sni))
             }
-            // scanned endpoints first (entries look like "ip@mode"), each with the mode it was verified with
-            val scanned = ArrayList<Pair<String, Int>>()
-            val first = Store.get(this, "ep_host")
+            WarpApi.ensureEnabled(this) { log(it) }
+            // scanned entries look like "ip@mode@sni"
+            val scanned = ArrayList<Att>()
             for (x in Store.get(this, "ep_list").split(",")) {
                 if (x.isEmpty()) continue
-                scanned.add(Pair(x.substringBefore("@"), x.substringAfter("@", "").toIntOrNull() ?: -1))
+                val parts = x.split("@")
+                val sIdx = (parts.getOrNull(2)?.toIntOrNull() ?: 0).coerceIn(0, 2)
+                scanned.add(Att(parts[0], parts.getOrNull(1)?.toIntOrNull() ?: 1, Net.SNIS[sIdx]))
             }
-            if (first.isNotEmpty() && scanned.none { it.first == first }) scanned.add(0, Pair(first, -1))
-            for (e in scanned) add(e.first, if (e.second == 0) 0 else 1, Net.SNI1)
+            val first = Store.get(this, "ep_host")
+            if (first.isNotEmpty() && scanned.none { it.host == first }) scanned.add(0, Att(first, 1, Net.SNI0))
+            for (x in scanned.take(4)) add(x.host, x.mode, x.sni)
+            // endpoints from an imported aether:// link
+            for (h in listOf(Store.get(this, "imp_outer"), Store.get(this, "imp_inner"))) {
+                add(h, 1, Net.SNI0)
+                add(h, 0, Net.SNI0)
+                add(h, 1, Net.SNI1)
+            }
             val e4 = Store.get(this, "reg_ep4")
             val e6 = Store.get(this, "reg_ep6")
-            add(e4, 1, Net.SNI1)
-            add(e4, 0, Net.SNI1)
-            add(e6, 1, Net.SNI1)
-            for (e in scanned) add(e.first, if (e.second == 0) 1 else 0, Net.SNI1)
-            add("162.159.198.2", 1, Net.SNI1)
+            for (sn in arrayOf(Net.SNI0, Net.SNI1)) {
+                add(e4, 1, sn)
+                add(e4, 0, sn)
+            }
+            add(e6, 1, Net.SNI0)
+            for (x in scanned) {
+                add(x.host, 1, Net.SNI0)
+                add(x.host, 0, Net.SNI0)
+                add(x.host, 1, Net.SNI1)
+            }
+            add("162.159.198.2", 1, Net.SNI0)
             add(e4, 1, Net.SNI2)
-            add(e4, 0, Net.SNI2)
             if (atts.isEmpty()) throw Exception("کانفیگ ندارید؛ ابتدا اسکن کنید")
 
             var found: Http2Conn? = null
             var lastErr = "ناموفق"
-            for (a in atts.take(10)) {
+            for (a in atts.take(12)) {
                 if (!running) return
                 try {
                     found = openTunnel(a.host, port, a.mode, a.sni)
