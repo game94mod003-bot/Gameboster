@@ -1,13 +1,13 @@
 # Psiphone abulix
 
-اپ اندروید (Kotlin + Compose) با هسته Xray: CDN Fronting روی Cloudflare (WS+TLS)، Beast Mode (Fragment + TLS fingerprint رندوم)،
-اسکنر IP تمیز، پینگ، کشور خروجی، نمودار مصرف، پایداری، و اشتراک کانفیگ رمزنگاری‌شده (فقط داخل همین اپ).
+Android VPN app (WARP over MASQUE / CONNECT-IP on HTTP/2, IPv4 + IPv6) with Beast-Mode animated UI,
+real-data scanner, ping, stability, exit country, usage chart and encrypted `abulix://` config sharing (only this app can read them).
 
-## ساخت APK
-1. همه فایل‌ها را در یک ریپوی GitHub آپلود کن.
-2. تب Actions → Build Debug APK (خودکار اجرا میشه).
-3. خروجی: Artifacts → PsiphoneAbulix-debug.
+## Build with GitHub
+1. Upload all files of this project to the root of a GitHub repository (keep the `.github` folder).
+2. Open the **Actions** tab, wait for **Build Psiphone abulix APK**, then download the **PsiphoneAbulix-APK** artifact.
 
-## قبل از استفاده
-به یک سرور خودت نیاز داری (VLESS/Trojan + WebSocket + TLS پشت Cloudflare با پروکسی نارنجی).
-لینک vless://... رو کپی کن و در تب «کانفیگ‌ها» از کلیپ‌بورد اضافه کن، بعد اسکنر رو بزن و بهترین IP رو انتخاب کن.
+## Usage
+1. Tap **Get WARP key** (or just press Scan, it does it automatically).
+2. **Scan** to find verified endpoints. 3. **Connect**.
+4. **Share**: the share button creates an `abulix://` link of your endpoints. The receiver pastes it and still gets their own WARP key.

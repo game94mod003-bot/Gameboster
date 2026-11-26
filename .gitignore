@@ -1,5 +1,6 @@
-build/
 .gradle/
+build/
 local.properties
-app/libs/*.aar
-app/src/main/res/font/*.ttf
+.idea/
+*.iml
+.DS_Store
