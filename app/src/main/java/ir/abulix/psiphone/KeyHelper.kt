@@ -20,7 +20,7 @@ import javax.security.auth.x500.X500Principal
 
 /** EC P-256 key (kept in Android Keystore) used for the MASQUE mTLS client certificate. */
 object KeyHelper {
-    private const val ALIAS = "aether_ec"
+    private const val ALIAS = "abulix_ec"
 
     private fun store(): KeyStore {
         val k = KeyStore.getInstance("AndroidKeyStore")
@@ -40,7 +40,7 @@ object KeyHelper {
                 KeyProperties.DIGEST_SHA384,
                 KeyProperties.DIGEST_SHA512
             )
-            .setCertificateSubject(X500Principal("CN=aether"))
+            .setCertificateSubject(X500Principal("CN=abulix"))
             .setCertificateSerialNumber(BigInteger.valueOf(now))
             .setCertificateNotBefore(Date(now - 86400000L))
             .setCertificateNotAfter(Date(now + 3650L * 86400000L))
