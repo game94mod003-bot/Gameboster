@@ -1,5 +1,6 @@
 package com.abolix.gamebooster;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.net.URI;
@@ -34,7 +35,10 @@ public final class ProxyNode {
     public String getProtocol() { return protocol; }
     public String getServer() { return server; }
     public int getPort() { return port; }
-    public JSONObject getOutbound() { return new JSONObject(outbound.toString()); }
+    public JSONObject getOutbound() throws JSONException {
+        // Return a defensive copy without leaking the mutable internal JSON object.
+        return new JSONObject(outbound.toString());
+    }
 
     public JSONObject toStorageJson() {
         JSONObject out = new JSONObject();

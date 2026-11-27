@@ -15,6 +15,7 @@ import org.json.JSONObject;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -575,7 +576,11 @@ public final class AbolixVpnService extends VpnService {
             if (prefix == null) continue;
             String address = String.valueOf(call(prefix, "address"));
             int bits = ((Number) call(prefix, "prefix")).intValue();
-            if (Build.VERSION.SDK_INT >= 33) builder.excludeRoute(new android.net.IpPrefix(address, bits));
+            if (Build.VERSION.SDK_INT >= 33) {
+                // Android 13+ exposes IpPrefix(InetAddress, int), not IpPrefix(String, int).
+                InetAddress inetAddress = InetAddress.getByName(address);
+                builder.excludeRoute(new android.net.IpPrefix(inetAddress, bits));
+            }
         }
     }
 
