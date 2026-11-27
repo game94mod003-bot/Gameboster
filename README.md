@@ -1,4 +1,29 @@
-# Abulix BEASTMODE (v0.1 — minimal connectable build)
-1. Push to GitHub → Actions → Build APK → download artifact.
-2. Open app, paste a WireGuard config (from your own server), tap connect.
-Tag `v0.1.0` to publish a Release.
+# ابولیکس VPN (Abolix)
+
+اپ اندروید (VpnService) برای عبور با **Domain Fronting روی IPهای تمیز Akamai** — بدون هیچ وابستگی به Cloudflare.
+کانال تلگرام: **@Abolix**
+
+## قابلیت‌ها
+- اسکن رنج IP آکامای با تعداد دلخواه (1000 / 2000 / 3000 / …)، مرحله‌ی دوم سنجش دقیق (پایداری و افت)، و تأیید با سرور کانفیگ فعال (WebSocket)
+- دکمه‌ی افزودن خودکار بهترین IPها به «لیست IP تمیز» (یا افزودن دستی با لمس هر نتیجه)
+- اتصال با Xray-core: VLESS / Trojan / VMess روی WS، gRPC، HTTPUpgrade، XHTTP، TCP — با جایگزینی IP تمیز و SNI/Host فرانتینگ
+- حالت «خودکار»: ترکیب IPهای تمیز × فرگمنت TLS (خاموش/معمولی/شدید) × فینگرپرینت (chrome/firefox/randomized) و تعویض خودکار هنگام قطعی
+- داشبورد: پینگ، IP خروجی، دانلود/آپلود لحظه‌ای، نمودار زنده، درصد پایداری، تست یوتیوب/تلگرام/گوگل از داخل تونل
+- انیمیشن سبک (۲۰ فریم بر ثانیه، بدون هیچ تأثیر روی ترافیک)
+- DNS پیش‌فرض: 8.8.8.8 / 9.9.9.9 / AdGuard؛ آدرس‌های تست: Google, AWS, ipinfo — هیچ آدرس Cloudflare‌ای در پروژه نیست
+
+## ساخت روی GitHub
+1. این پوشه را به‌عنوان یک مخزن جدید روی GitHub پوش کنید.
+2. (توصیه‌شده) یک کلید امضای دائمی بسازید تا اندروید نصب‌های بعدی را «به‌روزرسانی» حساب کند:
+   ```
+   keytool -genkeypair -v -keystore abolix.jks -alias abolix -keyalg RSA -keysize 4096 -validity 10000
+   base64 -w0 abolix.jks   # خروجی را در Secret بگذارید
+   ```
+   در Settings → Secrets → Actions این‌ها را بسازید: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`
+3. برای ریلیز: `git tag v1.0.0 && git push origin v1.0.0` (یا Actions → Run workflow با publish)
+4. APK امضاشده در Releases و Artifacts قرار می‌گیرد.
+
+## نکته‌ها (صادقانه)
+- بیلد در این محیط تست نشده؛ اولین اجرای Actions را چک کنید. اگر مرحله‌ی `hev-socks5-tunnel` خطا داد، برنامه در «حالت پروکسی» (setHttpProxy) کار می‌کند که فقط برنامه‌های پشتیبان پروکسی (مثل Chrome) را می‌گیرد.
+- Domain Fronting فقط وقتی کار می‌کند که سرور مقصد (کانفیگ شما) پشت همان CDN باشد و CDN اجازه بدهد. اسکنر فقط IPهای سالم را پیدا می‌کند؛ کانفیگ را از کانال @Abolix بگیرید.
+- هشدار «برنامه ناامن» اندروید برای APKهای خارج از پلی‌استور عادی است و با رمز یا ترفند در خود برنامه برداشته نمی‌شود؛ امضای دائمی، targetSdk 34 و حداقل مجوزها کمک می‌کند.
