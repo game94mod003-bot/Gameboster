@@ -127,7 +127,10 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        connected = getPreferences().getBoolean("vpn_connected", false);
+        android.content.SharedPreferences vpnPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        connected = vpnPrefs.getBoolean("vpn_connected", false);
+        String savedStatus = vpnPrefs.getString("vpn_status", "");
+        if (connectionState != null && !savedStatus.isEmpty()) connectionState.setText(savedStatus);
         registerVpnReceiver();
         handler.removeCallbacks(trafficRunnable);
         handler.post(trafficRunnable);
@@ -462,7 +465,7 @@ public final class MainActivity extends Activity {
         LinearLayout info = cardColumn();
         info.addView(text("درباره Abolix", 15, Color.WHITE, true));
         addGap(info, 7);
-        info.addView(text("نسخه 1.0.0 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، Shadowsocks، Hysteria2 و TUIC\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
+        info.addView(text("نسخه 1.0.0 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
         page.addView(info);
     }
 
@@ -592,7 +595,7 @@ public final class MainActivity extends Activity {
         LinearLayout box = new LinearLayout(this);
         box.setPadding(dp(18), dp(10), dp(18), dp(4));
         box.setOrientation(LinearLayout.VERTICAL);
-        TextView hint = text("لینک تکی یا چند لینک را هرکدام در یک خط وارد کن. فرمت‌های متداول VLESS، VMess، Trojan، Shadowsocks، Hysteria2 و TUIC پشتیبانی می‌شوند.", 12, 0xff9aa8bd, false);
+        TextView hint = text("لینک تکی یا چند لینک را وارد کن؛ همچنین متن کامل Clash YAML، sing-box JSON یا Xray JSON و اشتراک Base64 قابل‌خواندن است. VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP پشتیبانی می‌شوند. فایل‌های دارای XHTTP، mKCP یا SSR با هسته رسمی sing-box سازگار نیستند.", 12, 0xff9aa8bd, false);
         box.addView(hint);
         EditText input = editText("vless://…", true);
         LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(-1, dp(150));

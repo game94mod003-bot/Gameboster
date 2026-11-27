@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
@@ -37,14 +37,11 @@
         <service
             android:name=".AbolixVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
-            android:exported="true"
-            android:foregroundServiceType="specialUse">
+            android:exported="false"
+            android:foregroundServiceType="systemExempted">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="VPN tunnel for user-authorized private network connections and per-app routing." />
             <meta-data
                 android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
                 android:value="false" />

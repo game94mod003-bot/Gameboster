@@ -88,69 +88,50 @@ public final class SubscriptionManager {
     }
 
     private static byte[] download(String address) throws Exception {
-        URL url = new URL(address);
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        connection.setRequestMethod("GET");
-        connection.setConnectTimeout(7000);
-        connection.setReadTimeout(10000);
-        connection.setInstanceFollowRedirects(false);
-        connection.setRequestProperty("Accept", "text/plain, application/json;q=0.9, */*;q=0.8");
-        connection.setRequestProperty("User-Agent", "Abolix-Android/1.0");
-        try {
-            int code = connection.getResponseCode();
-            if (code >= 300 && code < 400) throw new Exception("redirect اشتراک پذیرفته نشد؛ لینک HTTPS نهایی را وارد کن");
-            if (code != HttpURLConnection.HTTP_OK) throw new Exception("سرور اشتراک HTTP " + code + " برگرداند");
-            int length = connection.getContentLength();
-            if (length > MAX_BYTES) throw new Exception("حجم اشتراک بیشتر از 3 مگابایت است");
-            try (InputStream input = connection.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[8192];
-                int count;
-                while ((count = input.read(buffer)) != -1) {
-                    if (output.size() + count > MAX_BYTES) throw new Exception("حجم اشتراک بیشتر از 3 مگابایت است");
-                    output.write(buffer, 0, count);
-                }
-                return output.toByteArray();
+        URL current = new URL(address);
+        java.util.HashSet<String> visited = new java.util.HashSet<>();
+        for (int redirect = 0; redirect <= 5; redirect++) {
+            if (!"https".equalsIgnoreCase(current.getProtocol())) {
+                throw new IllegalArgumentException("اشتراک فقط از HTTPS دریافت می‌شود؛ تغییر مسیر ناامن رد شد");
             }
-        } finally {
-            connection.disconnect();
+            if (!visited.add(current.toExternalForm())) throw new java.io.IOException("حلقه تغییر مسیر در آدرس اشتراک شناسایی شد");
+            HttpURLConnection connection = (HttpURLConnection) current.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(7000);
+            connection.setReadTimeout(12000);
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestProperty("Accept", "text/plain, application/json;q=0.9, */*;q=0.8");
+            connection.setRequestProperty("User-Agent", "Abolix-Android/1.1");
+            try {
+                int code = connection.getResponseCode();
+                if (code >= 300 && code < 400) {
+                    String location = connection.getHeaderField("Location");
+                    if (location == null || location.trim().isEmpty()) throw new java.io.IOException("سرور اشتراک مسیر تغییر آدرس را اعلام نکرد");
+                    if (redirect == 5) throw new java.io.IOException("تعداد تغییر مسیرهای اشتراک بیش از حد مجاز است");
+                    current = new URL(current, location.trim());
+                    continue;
+                }
+                if (code != HttpURLConnection.HTTP_OK) throw new java.io.IOException("سرور اشتراک HTTP " + code + " برگرداند");
+                int length = connection.getContentLength();
+                if (length > MAX_BYTES) throw new java.io.IOException("حجم اشتراک بیشتر از 3 مگابایت است");
+                try (InputStream input = connection.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        if (output.size() + count > MAX_BYTES) throw new java.io.IOException("حجم اشتراک بیشتر از 3 مگابایت است");
+                        output.write(buffer, 0, count);
+                    }
+                    return output.toByteArray();
+                }
+            } finally {
+                connection.disconnect();
+            }
         }
+        throw new java.io.IOException("دریافت اشتراک ناموفق بود");
     }
 
     public static List<ProxyNode> parseSubscription(String body) throws Exception {
-        if (body == null || body.trim().isEmpty()) throw new IllegalArgumentException("محتوای اشتراک خالی است");
-        String candidate = body.trim().replace("\uFEFF", "");
-        if (!candidate.contains("://") && !candidate.startsWith("{")) {
-            String encoded = candidate.replaceAll("\\s", "");
-            try {
-                byte[] decoded = Base64.decode(encoded, Base64.URL_SAFE | Base64.NO_WRAP);
-                String asText = new String(decoded, StandardCharsets.UTF_8).trim();
-                if (asText.contains("://")) candidate = asText;
-            } catch (Exception urlSafeError) {
-                try {
-                    byte[] decoded = Base64.decode(encoded, Base64.DEFAULT);
-                    String asText = new String(decoded, StandardCharsets.UTF_8).trim();
-                    if (asText.contains("://")) candidate = asText;
-                } catch (Exception ignored) { }
-            }
-        }
-        String[] lines = candidate.split("\\r?\\n");
-        ArrayList<ProxyNode> nodes = new ArrayList<>();
-        ArrayList<String> errors = new ArrayList<>();
-        for (String line : lines) {
-            String value = line.trim();
-            if (value.isEmpty() || value.startsWith("#")) continue;
-            String normalized = value.toLowerCase(java.util.Locale.ROOT);
-            if (!(normalized.startsWith("vless://") || normalized.startsWith("vmess://") || normalized.startsWith("trojan://")
-                    || normalized.startsWith("ss://") || normalized.startsWith("hysteria2://") || normalized.startsWith("hy2://")
-                    || normalized.startsWith("tuic://"))) continue;
-            try { nodes.add(ProxyNode.parse(value)); }
-            catch (Exception e) { if (errors.size() < 3) errors.add(safeMessage(e)); }
-        }
-        if (nodes.isEmpty()) {
-            String suffix = errors.isEmpty() ? "" : "\n" + android.text.TextUtils.join("\n", errors);
-            throw new IllegalArgumentException("هیچ لینک پشتیبانی‌شده‌ای در اشتراک پیدا نشد. فرمت‌های قابل‌خواندن: VLESS، VMess، Trojan، Shadowsocks، Hysteria2 و TUIC." + suffix);
-        }
-        return nodes;
+        return ConfigImporter.parse(body);
     }
 
     private static void commit(Context context, String url, String raw, List<ProxyNode> nodes) throws Exception {

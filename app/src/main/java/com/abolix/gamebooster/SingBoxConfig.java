@@ -55,6 +55,9 @@ public final class SingBoxConfig {
                 .put("optimistic", new JSONObject().put("enabled", true).put("timeout", "3h"));
 
         JSONObject route = new JSONObject()
+                // auto_route captures device traffic; auto_detect_interface pins proxy
+                // sockets to the physical uplink instead of looping back into the TUN.
+                .put("auto_detect_interface", true)
                 .put("final", "proxy")
                 .put("rules", new JSONArray().put(new JSONObject()
                         .put("protocol", "dns")

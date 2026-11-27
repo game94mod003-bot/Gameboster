@@ -7,6 +7,8 @@ import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.VpnService;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
@@ -33,6 +35,9 @@ public final class AbolixVpnService extends VpnService {
     private static volatile boolean libboxInitialized;
     private static final Object LIBBOX_SETUP_LOCK = new Object();
     private final Object coreLock = new Object();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private Runnable startupWatchdog;
+    private long startupWatchdogGeneration = -1L;
     private long lifecycleGeneration;
     private boolean starting;
 
@@ -42,6 +47,9 @@ public final class AbolixVpnService extends VpnService {
     private volatile String activeConfig = "";
     private volatile Object defaultInterfaceListener;
     private volatile android.net.ConnectivityManager.NetworkCallback defaultNetworkCallback;
+    private volatile android.net.Network selectedUnderlyingNetwork;
+    private volatile String tunInterfaceName = "";
+    private volatile String startupStage = "آماده‌سازی سرویس";
     private String currentNode = "";
 
     public static void start(android.content.Context context, String config, String node) {
@@ -74,6 +82,7 @@ public final class AbolixVpnService extends VpnService {
     }
 
     @Override public void onRevoke() {
+        cancelStartupWatchdog();
         synchronized (this) {
             lifecycleGeneration++;
             starting = false;
@@ -84,6 +93,7 @@ public final class AbolixVpnService extends VpnService {
     }
 
     @Override public void onDestroy() {
+        cancelStartupWatchdog();
         synchronized (this) {
             lifecycleGeneration++;
             starting = false;
@@ -96,6 +106,7 @@ public final class AbolixVpnService extends VpnService {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || ACTION_STOP.equals(intent.getAction())) {
+            cancelStartupWatchdog();
             final long stopGeneration;
             synchronized (this) {
                 stopGeneration = ++lifecycleGeneration;
@@ -125,6 +136,7 @@ public final class AbolixVpnService extends VpnService {
             startGeneration = ++lifecycleGeneration;
         }
         startForegroundCompat("در حال اتصال · " + requestedNode);
+        armStartupWatchdog(startGeneration);
         new Thread(() -> {
             try {
                 synchronized (coreLock) {
@@ -137,6 +149,7 @@ public final class AbolixVpnService extends VpnService {
                     running = true;
                 }
                 if (!isCurrentGeneration(startGeneration)) return;
+                cancelStartupWatchdog(startGeneration);
                 broadcastState(true, "متصل به " + currentNode);
                 updateNotification("متصل · " + currentNode);
             } catch (Throwable error) {
@@ -148,9 +161,50 @@ public final class AbolixVpnService extends VpnService {
                 synchronized (AbolixVpnService.this) {
                     if (lifecycleGeneration == startGeneration) starting = false;
                 }
+                cancelStartupWatchdog(startGeneration);
             }
         }, "Abolix-Core-Start").start();
         return START_NOT_STICKY;
+    }
+
+    private void armStartupWatchdog(final long generation) {
+        cancelStartupWatchdog();
+        startupWatchdogGeneration = generation;
+        startupWatchdog = () -> {
+            boolean expired;
+            synchronized (AbolixVpnService.this) {
+                expired = lifecycleGeneration == generation && starting;
+                if (expired) {
+                    lifecycleGeneration++;
+                    starting = false;
+                }
+            }
+            if (expired) {
+                startupWatchdog = null;
+                startupWatchdogGeneration = -1L;
+                String message = "راه‌اندازی بیش از 45 ثانیه در این مرحله متوقف ماند: " + startupStage
+                        + ". اتصال کامل نشد؛ گزارش Abolix را بررسی کن.";
+                broadcastState(false, message);
+                updateNotification(message);
+                new Thread(() -> {
+                    synchronized (coreLock) { closeEngineCore(); }
+                    stopForeground(true);
+                }, "Abolix-Core-Timeout-Cleanup").start();
+            }
+        };
+        mainHandler.postDelayed(startupWatchdog, 45000L);
+    }
+
+    private void cancelStartupWatchdog() {
+        Runnable pending = startupWatchdog;
+        startupWatchdog = null;
+        startupWatchdogGeneration = -1L;
+        if (pending != null) mainHandler.removeCallbacks(pending);
+    }
+
+    private void cancelStartupWatchdog(long generation) {
+        if (startupWatchdogGeneration != generation) return;
+        cancelStartupWatchdog();
     }
 
     private boolean isCurrentGeneration(long generation) {
@@ -158,27 +212,45 @@ public final class AbolixVpnService extends VpnService {
     }
 
     private void startEngine(String config) throws Exception {
+        setStartupStage("بستن اتصال قبلی");
         closeEngineCore();
+        setStartupStage("بارگذاری کتابخانه sing-box");
         Class<?> libbox = Class.forName("io.nekohasekai.libbox.Libbox");
         Class<?> setupType = Class.forName("io.nekohasekai.libbox.SetupOptions");
         if (!libboxInitialized) {
+            setStartupStage("راه‌اندازی اولیه libbox");
             synchronized (LIBBOX_SETUP_LOCK) {
                 if (!libboxInitialized) {
+                    java.io.File baseDir = new java.io.File(getFilesDir(), "libbox");
+                    java.io.File workingDir = new java.io.File(getFilesDir(), "sing-box");
+                    java.io.File tempDir = new java.io.File(getCacheDir(), "sing-box");
+                    if ((!baseDir.isDirectory() && !baseDir.mkdirs())
+                            || (!workingDir.isDirectory() && !workingDir.mkdirs())
+                            || (!tempDir.isDirectory() && !tempDir.mkdirs())) {
+                        throw new java.io.IOException("ساخت پوشه‌های کاری هسته ناموفق بود");
+                    }
                     Object setup = setupType.getDeclaredConstructor().newInstance();
-                    setProperty(setup, "BasePath", getFilesDir().getAbsolutePath());
-                    setProperty(setup, "WorkingPath", getFilesDir().getAbsolutePath());
-                    setProperty(setup, "TempPath", getCacheDir().getAbsolutePath());
-                    setProperty(setup, "Debug", false);
-                    setProperty(setup, "LogMaxLines", 300);
-                    setProperty(setup, "AppVersion", "1.0.0");
-                    setProperty(setup, "AppMarketingVersion", "1.0.0");
-                    Method setupMethod = findMethod(libbox, "setup", 1);
-                    setupMethod.invoke(null, setup);
+                    setPropertyRequired(setup, "BasePath", baseDir.getAbsolutePath());
+                    setPropertyRequired(setup, "WorkingPath", workingDir.getAbsolutePath());
+                    setPropertyRequired(setup, "TempPath", tempDir.getAbsolutePath());
+                    setPropertyRequired(setup, "FixAndroidStack", true);
+                    setPropertyRequired(setup, "Debug", BuildConfig.DEBUG);
+                    setPropertyRequired(setup, "LogMaxLines", 1000);
+                    setPropertyRequired(setup, "AppVersion", String.valueOf(BuildConfig.VERSION_CODE));
+                    setPropertyRequired(setup, "AppMarketingVersion", BuildConfig.VERSION_NAME);
+                    findMethod(libbox, "setup", 1).invoke(null, setup);
+                    // These draft hooks are present in libbox 1.14.x and used by its Android client.
+                    invokeStaticIfPresent(libbox, "promoteOOMDraft");
+                    invokeStaticIfPresent(libbox, "discardPowerReportDraft");
                     libboxInitialized = true;
                 }
             }
         }
 
+        setStartupStage("بررسی ساختار کانفیگ با sing-box");
+        validateLibboxConfig(libbox, config);
+
+        setStartupStage("آماده‌سازی رابط اندروید");
         Class<?> platformType = Class.forName("io.nekohasekai.libbox.PlatformInterface");
         Object platform = Proxy.newProxyInstance(platformType.getClassLoader(), new Class<?>[]{platformType},
                 (proxy, method, args) -> handlePlatformCall(method, args));
@@ -188,17 +260,31 @@ public final class AbolixVpnService extends VpnService {
                 (proxy, method, args) -> handleHandlerCall(method, args));
         Class<?> serverType = Class.forName("io.nekohasekai.libbox.CommandServer");
         Constructor<?> constructor = findTwoArgConstructor(serverType, handlerType, platformType);
+        setStartupStage("ساخت CommandServer");
         commandServer = constructor.newInstance(handler, platform);
+        setStartupStage("شروع CommandServer");
         invokeNoArg(commandServer, "start");
         activeConfig = config;
 
         Class<?> overrideType = Class.forName("io.nekohasekai.libbox.OverrideOptions");
         Object override = overrideType.getDeclaredConstructor().newInstance();
         Method reload = findCompatibleMethod(serverType, "startOrReloadService", String.class, overrideType);
-        Object result = reload.invoke(commandServer, config, override);
+        setStartupStage("بارگذاری سرویس و ساخت رابط VPN");
+        Object result;
+        try {
+            result = reload.invoke(commandServer, config, override);
+        } catch (java.lang.reflect.InvocationTargetException error) {
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            throw new IllegalStateException("sing-box نتوانست سرویس را بارگذاری کند: " + safeMessage(cause), cause);
+        }
         if (result instanceof String && !((String) result).trim().isEmpty()) {
             throw new IllegalStateException((String) result);
         }
+        if (tunDescriptor == null) {
+            throw new IllegalStateException("هسته فرمان شروع را پذیرفت، اما رابط VPN اندروید (TUN) ساخته نشد. لاگ openTun را بررسی کن.");
+        }
+        startupStage = "اتصال برقرار شد";
+        Log.i(TAG, "sing-box service started and Android TUN is ready");
     }
 
     private Object createSystemProxyStatus() {
@@ -232,29 +318,27 @@ public final class AbolixVpnService extends VpnService {
     }
 
 
-    private void startDefaultInterfaceMonitor(Object listener) {
+    private void startDefaultInterfaceMonitor(Object listener) throws Exception {
+        defaultInterfaceListener = listener;
+        closeDefaultInterfaceMonitor();
         defaultInterfaceListener = listener;
         android.net.ConnectivityManager connectivity =
                 (android.net.ConnectivityManager) getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
-        if (connectivity == null) {
-            notifyDefaultInterface(null);
-            return;
-        }
-        closeDefaultInterfaceMonitor();
-        defaultInterfaceListener = listener;
+        if (connectivity == null) throw new IllegalStateException("ConnectivityManager در دسترس نیست");
+        android.net.NetworkRequest request = new android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET).build();
         android.net.ConnectivityManager.NetworkCallback callback = new android.net.ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(android.net.Network network) { notifyDefaultInterfaceCurrent(); }
             @Override public void onLost(android.net.Network network) { notifyDefaultInterfaceCurrent(); }
+            @Override public void onCapabilitiesChanged(android.net.Network network, android.net.NetworkCapabilities capabilities) {
+                notifyDefaultInterfaceCurrent();
+            }
             @Override public void onLinkPropertiesChanged(android.net.Network network, android.net.LinkProperties properties) {
                 notifyDefaultInterfaceCurrent();
             }
         };
-        try {
-            connectivity.registerDefaultNetworkCallback(callback);
-            defaultNetworkCallback = callback;
-        } catch (RuntimeException error) {
-            Log.w(TAG, "Could not register default-network callback", error);
-        }
+        connectivity.registerNetworkCallback(request, callback);
+        defaultNetworkCallback = callback;
         notifyDefaultInterfaceCurrent();
     }
 
@@ -270,10 +354,43 @@ public final class AbolixVpnService extends VpnService {
         }
     }
 
+    private android.net.Network findPhysicalNetwork(android.net.ConnectivityManager connectivity) {
+        android.net.Network active = connectivity.getActiveNetwork();
+        android.net.NetworkCapabilities activeCaps = active == null ? null : connectivity.getNetworkCapabilities(active);
+        if (isPhysicalInternetNetwork(activeCaps)) return active;
+
+        android.net.Network best = null;
+        int bestScore = Integer.MIN_VALUE;
+        android.net.Network[] all = connectivity.getAllNetworks();
+        for (android.net.Network network : all) {
+            android.net.NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
+            if (!isPhysicalInternetNetwork(caps)) continue;
+            int score = 0;
+            if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)) score += 30;
+            if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) score += 20;
+            if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)) score += 10;
+            if (caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 5;
+            if (score > bestScore) { best = network; bestScore = score; }
+        }
+        return best;
+    }
+
+    private boolean isPhysicalInternetNetwork(android.net.NetworkCapabilities caps) {
+        return caps != null
+                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN);
+    }
+
     private void notifyDefaultInterfaceCurrent() {
         android.net.ConnectivityManager connectivity =
                 (android.net.ConnectivityManager) getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
-        notifyDefaultInterface(connectivity == null ? null : connectivity.getActiveNetwork());
+        android.net.Network physical = connectivity == null ? null : findPhysicalNetwork(connectivity);
+        if (physical != selectedUnderlyingNetwork) {
+            selectedUnderlyingNetwork = physical;
+            try { setUnderlyingNetworks(physical == null ? new android.net.Network[0] : new android.net.Network[]{physical}); }
+            catch (RuntimeException error) { Log.w(TAG, "Could not set underlying physical network", error); }
+        }
+        notifyDefaultInterface(physical);
     }
 
     private void notifyDefaultInterface(android.net.Network network) {
@@ -297,7 +414,7 @@ public final class AbolixVpnService extends VpnService {
         }
         try {
             for (Method method : listener.getClass().getMethods()) {
-                if ("updateDefaultInterface".equals(method.getName()) && method.getParameterTypes().length == 4) {
+                if ("updateDefaultInterface".equalsIgnoreCase(method.getName()) && method.getParameterTypes().length == 4) {
                     method.invoke(listener, interfaceName, interfaceIndex, false, false);
                     return;
                 }
@@ -349,20 +466,20 @@ public final class AbolixVpnService extends VpnService {
             if (interfaceName == null || interfaceName.isEmpty() || systemInterface == null) continue;
 
             Object boxInterface = libboxInterfaceType.getDeclaredConstructor().newInstance();
-            setProperty(boxInterface, "Name", interfaceName);
+            setPropertyRequired(boxInterface, "Name", interfaceName);
 
             java.util.ArrayList<String> dnsServers = new java.util.ArrayList<>();
             for (java.net.InetAddress address : link.getDnsServers()) {
                 if (address != null && address.getHostAddress() != null) dnsServers.add(address.getHostAddress());
             }
-            setProperty(boxInterface, "DnsServer", iteratorProxy("io.nekohasekai.libbox.StringIterator", dnsServers));
+            setProperty(boxInterface, "DNSServer", iteratorProxy("io.nekohasekai.libbox.StringIterator", dnsServers));
 
             java.util.ArrayList<String> searchDomains = new java.util.ArrayList<>();
             String domains = link.getDomains();
             if (domains != null) {
                 for (String domain : domains.split("[,\\s]+")) if (!domain.isEmpty()) searchDomains.add(domain);
             }
-            setProperty(boxInterface, "DnsSearchDomain", iteratorProxy("io.nekohasekai.libbox.StringIterator", searchDomains));
+            setProperty(boxInterface, "DNSSearchDomain", iteratorProxy("io.nekohasekai.libbox.StringIterator", searchDomains));
 
             java.util.ArrayList<String> gateways = new java.util.ArrayList<>();
             for (android.net.RouteInfo route : link.getRoutes()) {
@@ -380,7 +497,7 @@ public final class AbolixVpnService extends VpnService {
                 java.net.InetAddress unscoped = java.net.InetAddress.getByAddress(ip.getAddress());
                 addresses.add(unscoped.getHostAddress() + "/" + address.getNetworkPrefixLength());
             }
-            setProperty(boxInterface, "Addresses", iteratorProxy("io.nekohasekai.libbox.StringIterator", addresses));
+            setPropertyRequired(boxInterface, "Addresses", iteratorProxy("io.nekohasekai.libbox.StringIterator", addresses));
 
             int otherType = readStaticInt(libboxType, "InterfaceTypeOther", -1);
             int interfaceType = otherType;
@@ -392,8 +509,8 @@ public final class AbolixVpnService extends VpnService {
                 interfaceType = readStaticInt(libboxType, "InterfaceTypeEthernet", otherType);
             }
             if (interfaceType >= 0) setProperty(boxInterface, "Type", interfaceType);
-            setProperty(boxInterface, "Index", systemInterface.getIndex());
-            try { setProperty(boxInterface, "Mtu", systemInterface.getMTU()); }
+            setPropertyRequired(boxInterface, "Index", systemInterface.getIndex());
+            try { setProperty(boxInterface, "MTU", systemInterface.getMTU()); }
             catch (Exception ignored) { }
 
             int flags = 0;
@@ -408,6 +525,96 @@ public final class AbolixVpnService extends VpnService {
             result.add(boxInterface);
         }
         return iteratorProxy("io.nekohasekai.libbox.NetworkInterfaceIterator", result);
+    }
+
+    private Object findConnectionOwner(Object[] args) throws Exception {
+        if (args == null || args.length < 5) throw new IllegalArgumentException("پارامترهای FindConnectionOwner ناقص است");
+        if (Build.VERSION.SDK_INT < 29) return null;
+        android.net.ConnectivityManager connectivity =
+                (android.net.ConnectivityManager) getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
+        if (connectivity == null) return null;
+        int protocol = ((Number) args[0]).intValue();
+        String sourceAddress = String.valueOf(args[1]);
+        int sourcePort = ((Number) args[2]).intValue();
+        String destinationAddress = String.valueOf(args[3]);
+        int destinationPort = ((Number) args[4]).intValue();
+        java.net.InetSocketAddress local = new java.net.InetSocketAddress(InetAddress.getByName(sourceAddress), sourcePort);
+        java.net.InetSocketAddress remote = new java.net.InetSocketAddress(InetAddress.getByName(destinationAddress), destinationPort);
+        int uid = connectivity.getConnectionOwnerUid(protocol, local, remote);
+        if (uid < 0) return null;
+
+        Class<?> ownerType = Class.forName("io.nekohasekai.libbox.ConnectionOwner");
+        Object owner = ownerType.getDeclaredConstructor().newInstance();
+        setProperty(owner, "UserId", uid);
+        String userName = getPackageManager().getNameForUid(uid);
+        if (userName != null) setProperty(owner, "UserName", userName);
+        String[] packageNames = getPackageManager().getPackagesForUid(uid);
+        ArrayList<String> packageList = new ArrayList<>();
+        if (packageNames != null) java.util.Collections.addAll(packageList, packageNames);
+        Class<?> iteratorType = Class.forName("io.nekohasekai.libbox.StringIterator");
+        Object iterator = iteratorProxy("io.nekohasekai.libbox.StringIterator", packageList);
+        Method setter = null;
+        for (Method method : ownerType.getMethods()) {
+            if ("setAndroidPackageNames".equalsIgnoreCase(method.getName())
+                    && method.getParameterTypes().length == 1
+                    && method.getParameterTypes()[0].isAssignableFrom(iteratorType)) {
+                setter = method;
+                break;
+            }
+        }
+        if (setter == null) throw new NoSuchMethodException("ConnectionOwner.setAndroidPackageNames(StringIterator)");
+        setter.invoke(owner, iterator);
+        return owner;
+    }
+
+    private static void validateLibboxConfig(Class<?> libbox, String config) throws Exception {
+        // FormatConfig parses and normalizes JSON without constructing a second proxy engine.
+        // CheckConfig constructs a temporary box instance; doing that before the real Android
+        // PlatformInterface is attached can fail for TUN inbounds and needlessly initializes
+        // native services twice. The real startOrReloadService below performs full validation.
+        Method formatter = findMethod(libbox, "formatConfig", 1);
+        try {
+            Object formatted = formatter.invoke(null, config);
+            if (formatted == null) throw new IllegalArgumentException("sing-box پیکربندی را نرمال‌سازی نکرد");
+        } catch (java.lang.reflect.InvocationTargetException error) {
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            throw new IllegalArgumentException("ساختار کانفیگ توسط sing-box رد شد: " + safeMessage(cause), cause);
+        }
+    }
+
+    private static void invokeStaticIfPresent(Class<?> type, String name) {
+        try { type.getMethod(name).invoke(null); }
+        catch (NoSuchMethodException ignored) { }
+        catch (Exception error) { Log.w(TAG, "Optional libbox hook failed: " + name, error); }
+    }
+
+    private void setStartupStage(String stage) {
+        startupStage = stage;
+        Log.i(TAG, "Startup: " + stage);
+        updateNotification("راه‌اندازی هسته · " + stage);
+        broadcastState(false, "راه‌اندازی هسته: " + stage);
+    }
+
+    private static void setPropertyRequired(Object target, String property, Object value) throws Exception {
+        String setter = "set" + property;
+        for (Method method : target.getClass().getMethods()) {
+            if (!method.getName().equalsIgnoreCase(setter) || method.getParameterTypes().length != 1) continue;
+            Class<?> parameter = method.getParameterTypes()[0];
+            Object converted = value;
+            if (value instanceof Number) {
+                Number number = (Number) value;
+                if (parameter == long.class || parameter == Long.class) converted = number.longValue();
+                else if (parameter == int.class || parameter == Integer.class) converted = number.intValue();
+                else if (parameter == short.class || parameter == Short.class) converted = number.shortValue();
+                else if (parameter == byte.class || parameter == Byte.class) converted = number.byteValue();
+            }
+            try { method.invoke(target, converted); return; }
+            catch (java.lang.reflect.InvocationTargetException error) {
+                Throwable cause = error.getCause() == null ? error : error.getCause();
+                throw new IllegalStateException("تنظیم " + property + " در libbox ناموفق بود: " + safeMessage(cause), cause);
+            }
+        }
+        throw new NoSuchMethodException("Libbox setter پیدا نشد: " + setter + " در " + target.getClass().getName());
     }
 
     private static int readStaticInt(Class<?> type, String fieldName, int fallback) {
@@ -440,13 +647,8 @@ public final class AbolixVpnService extends VpnService {
             closeDefaultInterfaceMonitor();
             return defaultValue(method.getReturnType());
         }
-        if ("getInterfaces".equalsIgnoreCase(name)) {
-            try { return loadNetworkInterfaces(); }
-            catch (Exception error) {
-                Log.w(TAG, "Could not enumerate Android network interfaces", error);
-                return iteratorProxy("io.nekohasekai.libbox.NetworkInterfaceIterator", java.util.Collections.emptyList());
-            }
-        }
+        if ("getInterfaces".equalsIgnoreCase(name)) return loadNetworkInterfaces();
+        if ("findConnectionOwner".equalsIgnoreCase(name)) return findConnectionOwner(args);
         if ("underNetworkExtension".equalsIgnoreCase(name)
                 || "includeAllNetworks".equalsIgnoreCase(name)
                 || "usePlatformShell".equalsIgnoreCase(name)
@@ -458,9 +660,15 @@ public final class AbolixVpnService extends VpnService {
             updateNotification((title + " · " + body).trim());
             return defaultValue(method.getReturnType());
         }
+        if ("registerMyInterface".equalsIgnoreCase(name)) {
+            tunInterfaceName = args != null && args.length > 0 && args[0] != null ? String.valueOf(args[0]) : "";
+            Log.i(TAG, "Registered sing-box TUN interface: " + tunInterfaceName);
+            return defaultValue(method.getReturnType());
+        }
         if ("cancelNotification".equalsIgnoreCase(name) || "clearDNSCache".equalsIgnoreCase(name)
-                || "closeNeighborMonitor".equalsIgnoreCase(name) || "startNeighborMonitor".equalsIgnoreCase(name)
-                || "registerMyInterface".equalsIgnoreCase(name)) return defaultValue(method.getReturnType());
+                || "closeNeighborMonitor".equalsIgnoreCase(name) || "startNeighborMonitor".equalsIgnoreCase(name)) {
+            return defaultValue(method.getReturnType());
+        }
         return defaultValue(method.getReturnType());
     }
 
@@ -481,6 +689,12 @@ public final class AbolixVpnService extends VpnService {
             new Thread(this::reloadActiveConfig, "Abolix-Core-Reload").start();
         } else if ("getSystemProxyStatus".equalsIgnoreCase(name)) {
             return createSystemProxyStatus();
+        } else if ("setSystemProxyEnabled".equalsIgnoreCase(name)) {
+            // Android's VPN TUN already owns routing; the separate system HTTP proxy is disabled.
+            return null;
+        } else if ("triggerNativeCrash".equalsIgnoreCase(name)) {
+            Log.w(TAG, "libbox requested a native crash trigger; ignored by the production client");
+            return null;
         } else if ("connectSSHAgent".equalsIgnoreCase(name)) {
             return -1;
         } else if ("writeDebugMessage".equalsIgnoreCase(name) && args != null && args.length > 0) {
@@ -490,54 +704,66 @@ public final class AbolixVpnService extends VpnService {
     }
 
     private int openTun(Object options) throws Exception {
+        setStartupStage("ساخت رابط VPN اندروید");
+        Log.i(TAG, "openTun callback received from libbox");
         if (Build.VERSION.SDK_INT < 21) throw new IllegalStateException("Android 5 یا بالاتر لازم است");
+        if (prepare(this) != null) throw new SecurityException("مجوز VPN صادر نشده است؛ دوباره روی اتصال بزن و اجازه VPN را تأیید کن.");
+
         VpnService.Builder builder = new VpnService.Builder();
-        builder.setSession("Abolix · " + currentNode).setMtu(readInt(options, "Mtu", 1400));
-        if (Build.VERSION.SDK_INT >= 29) {
-            boolean metered = true;
-            android.net.ConnectivityManager connectivity =
-                    (android.net.ConnectivityManager) getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
-            android.net.Network activeNetwork = connectivity == null ? null : connectivity.getActiveNetwork();
-            android.net.NetworkCapabilities capabilities = activeNetwork == null || connectivity == null
-                    ? null : connectivity.getNetworkCapabilities(activeNetwork);
-            if (capabilities != null) {
-                metered = !capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
-            }
-            builder.setMetered(metered);
-        }
+        int mtu = readInt(options, "Mtu", 1400);
+        if (mtu < 576 || mtu > 9000) mtu = 1400;
+        builder.setSession("Abolix · " + currentNode).setMtu(mtu);
+        if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false);
 
         Object inet4Addresses = readProperty(options, "Inet4Address");
         Object inet6Addresses = readProperty(options, "Inet6Address");
         boolean hasInet4 = iteratorHasNext(inet4Addresses);
         boolean hasInet6 = iteratorHasNext(inet6Addresses);
-        addPrefixIterator(builder, inet4Addresses, true);
-        addPrefixIterator(builder, inet6Addresses, true);
-
-        Object dnsIterator = readProperty(options, "DnsServerAddress");
-        boolean hasDns = addDnsIterator(builder, dnsIterator);
-        if (!hasDns && readBoolean(options, "AutoRoute", true)) builder.addDnsServer("1.1.1.1");
+        int addressCount = addPrefixIterator(builder, inet4Addresses, true)
+                + addPrefixIterator(builder, inet6Addresses, true);
+        if (addressCount == 0) {
+            throw new IllegalStateException("هسته هیچ آدرس IPv4/IPv6 برای رابط VPN نداد؛ تنظیمات TUN را بررسی کن.");
+        }
 
         boolean autoRoute = readBoolean(options, "AutoRoute", true);
+        String dnsMode = unwrapStringBox(readProperty(options, "DnsMode"));
+        String disabledDnsMode = readLibboxStringConstant("DNSModeDisabled", "disabled");
+        boolean dnsEnabled = !dnsMode.equalsIgnoreCase(disabledDnsMode)
+                && !"disabled".equalsIgnoreCase(dnsMode)
+                && (autoRoute || !dnsMode.isEmpty());
+
+        if (dnsEnabled) {
+            Object dnsIterator = readProperty(options, "DnsServerAddress");
+            boolean hasDns = addDnsIterator(builder, dnsIterator, !autoRoute);
+            if (!hasDns && autoRoute) {
+                Log.w(TAG, "sing-box enabled DNS but provided no DNS server addresses");
+            }
+        }
+
         if (autoRoute) {
-            Object inet4Routes = firstAvailableIterator(options, "Inet4RouteAddress", "Inet4RouteRange");
-            Object inet6Routes = firstAvailableIterator(options, "Inet6RouteAddress", "Inet6RouteRange");
-            int routeCount4 = addPrefixIterator(builder, inet4Routes, false);
-            int routeCount6 = addPrefixIterator(builder, inet6Routes, false);
-            // Some sing-box configurations expose only route prefixes on API 33+ when
-            // route calculation has no explicit ranges; use the address family as fallback.
-            if (routeCount4 == 0 && hasInet4) builder.addRoute("0.0.0.0", 0);
-            if (routeCount6 == 0 && hasInet6) builder.addRoute("::", 0);
             if (Build.VERSION.SDK_INT >= 33) {
+                // Android 13+: sing-box provides calculated RouteAddress and RouteExcludeAddress prefixes.
+                int routeCount4 = addPrefixIterator(builder, readProperty(options, "Inet4RouteAddress"), false);
+                int routeCount6 = addPrefixIterator(builder, readProperty(options, "Inet6RouteAddress"), false);
+                if (routeCount4 == 0 && hasInet4) builder.addRoute("0.0.0.0", 0);
+                if (routeCount6 == 0 && hasInet6) builder.addRoute("::", 0);
                 addExcludedRoutes(builder, readProperty(options, "Inet4RouteExcludeAddress"));
                 addExcludedRoutes(builder, readProperty(options, "Inet6RouteExcludeAddress"));
+            } else {
+                // Before Android 13, use the route ranges generated by sing-box.
+                addPrefixIterator(builder, readProperty(options, "Inet4RouteRange"), false);
+                addPrefixIterator(builder, readProperty(options, "Inet6RouteRange"), false);
             }
             addPackages(builder, readProperty(options, "IncludePackage"), true);
             addPackages(builder, readProperty(options, "ExcludePackage"), false);
         }
+
         ParcelFileDescriptor descriptor = builder.establish();
-        if (descriptor == null) throw new IllegalStateException("سیستم اجازه ساخت تونل VPN را نداد");
+        if (descriptor == null) throw new IllegalStateException("سیستم تونل VPN را نساخت. مجوز VPN، محدودیت باتری یا تنظیمات امنیتی گوشی را بررسی کن.");
         closeTunDescriptor();
         tunDescriptor = descriptor;
+        Log.i(TAG, "Android TUN established (fd=" + descriptor.getFd() + ", mtu=" + mtu
+                + ", autoRoute=" + autoRoute + ", dnsMode=" + dnsMode + ")");
         return descriptor.getFd();
     }
 
@@ -556,15 +782,17 @@ public final class AbolixVpnService extends VpnService {
         return count;
     }
 
-    private boolean addDnsIterator(VpnService.Builder builder, Object iterator) throws Exception {
+    private boolean addDnsIterator(VpnService.Builder builder, Object iterator, boolean addHostRoute) throws Exception {
         if (iterator == null) return false;
         boolean added = false;
         while (booleanCall(iterator, "hasNext")) {
             Object address = call(iterator, "next");
-            if (address != null && !String.valueOf(address).isEmpty()) {
-                builder.addDnsServer(String.valueOf(address));
-                added = true;
-            }
+            if (address == null) continue;
+            String value = String.valueOf(address).trim();
+            if (value.isEmpty()) continue;
+            builder.addDnsServer(value);
+            if (addHostRoute) builder.addRoute(value, value.contains(":") ? 128 : 32);
+            added = true;
         }
         return added;
     }
@@ -584,16 +812,8 @@ public final class AbolixVpnService extends VpnService {
         }
     }
 
-    private Object firstAvailableIterator(Object options, String primary, String fallback) {
-        Object first = readProperty(options, primary);
-        if (iteratorHasNext(first)) return first;
-        Object alternate = readProperty(options, fallback);
-        return alternate != null ? alternate : first;
-    }
-
-    private boolean iteratorHasNext(Object iterator) {
-        if (iterator == null) return false;
-        try { return booleanCall(iterator, "hasNext"); } catch (Exception ignored) { return false; }
+    private boolean iteratorHasNext(Object iterator) throws Exception {
+        return iterator != null && booleanCall(iterator, "hasNext");
     }
 
     private void addPackages(VpnService.Builder builder, Object iterator, boolean allowed) throws Exception {
@@ -618,30 +838,62 @@ public final class AbolixVpnService extends VpnService {
         return values;
     }
 
-    private Object readProperty(Object target, String property) {
+    private Object readProperty(Object target, String property) throws Exception {
         if (target == null) return null;
         String expected = "get" + property;
         for (Method method : target.getClass().getMethods()) {
-            if (method.getParameterTypes().length == 0 && method.getName().equalsIgnoreCase(expected)) {
-                try { return method.invoke(target); } catch (Exception ignored) { }
+            if (method.getParameterTypes().length != 0 || !method.getName().equalsIgnoreCase(expected)) continue;
+            try {
+                return method.invoke(target);
+            } catch (java.lang.reflect.InvocationTargetException error) {
+                Throwable cause = error.getCause() == null ? error : error.getCause();
+                throw new IllegalStateException("خواندن " + property + " از libbox ناموفق بود: " + safeMessage(cause), cause);
             }
         }
+        Log.w(TAG, "Optional libbox getter not found: " + expected + " on " + target.getClass().getName());
         return null;
     }
 
-    private String stringProperty(Object target, String property) {
+    private String stringProperty(Object target, String property) throws Exception {
         Object value = readProperty(target, property);
         return value == null ? "" : String.valueOf(value);
     }
 
-    private int readInt(Object target, String property, int fallback) {
+    private int readInt(Object target, String property, int fallback) throws Exception {
         Object value = readProperty(target, property);
         return value instanceof Number ? ((Number) value).intValue() : fallback;
     }
 
-    private boolean readBoolean(Object target, String property, boolean fallback) {
+    private boolean readBoolean(Object target, String property, boolean fallback) throws Exception {
         Object value = readProperty(target, property);
         return value instanceof Boolean ? (Boolean) value : fallback;
+    }
+
+    private String unwrapStringBox(Object box) throws Exception {
+        if (box == null) return "";
+        Object value = readProperty(box, "Value");
+        if (value instanceof String) return ((String) value).trim();
+        // Go mobile's StringBox exposes its value as a field in some generated bindings.
+        try {
+            java.lang.reflect.Field field;
+            try { field = box.getClass().getField("value"); }
+            catch (NoSuchFieldException missingPublicField) {
+                field = box.getClass().getDeclaredField("value");
+                field.setAccessible(true);
+            }
+            Object fieldValue = field.get(box);
+            if (fieldValue instanceof String) return ((String) fieldValue).trim();
+        } catch (NoSuchFieldException ignored) { }
+        String rendered = String.valueOf(box);
+        return rendered == null ? "" : rendered.trim();
+    }
+
+    private static String readLibboxStringConstant(String fieldName, String fallback) {
+        try {
+            Class<?> libbox = Class.forName("io.nekohasekai.libbox.Libbox");
+            Object value = libbox.getField(fieldName).get(null);
+            return value == null ? fallback : String.valueOf(value);
+        } catch (Exception ignored) { return fallback; }
     }
 
     private static Object call(Object object, String method) throws Exception {
@@ -685,14 +937,22 @@ public final class AbolixVpnService extends VpnService {
     private static void setProperty(Object target, String property, Object value) {
         String setter = "set" + property;
         for (Method method : target.getClass().getMethods()) {
-            if (!method.getName().equals(setter) || method.getParameterTypes().length != 1) continue;
+            if (!method.getName().equalsIgnoreCase(setter) || method.getParameterTypes().length != 1) continue;
             try {
                 Class<?> parameter = method.getParameterTypes()[0];
                 Object converted = value;
-                if (value instanceof Integer && (parameter == long.class || parameter == Long.class)) converted = ((Integer) value).longValue();
+                if (value instanceof Number) {
+                    Number number = (Number) value;
+                    if (parameter == long.class || parameter == Long.class) converted = number.longValue();
+                    else if (parameter == int.class || parameter == Integer.class) converted = number.intValue();
+                    else if (parameter == short.class || parameter == Short.class) converted = number.shortValue();
+                    else if (parameter == byte.class || parameter == Byte.class) converted = number.byteValue();
+                }
                 method.invoke(target, converted);
                 return;
-            } catch (Exception ignored) { }
+            } catch (Exception error) {
+                Log.w(TAG, "Could not set libbox property " + property, error);
+            }
         }
     }
 
@@ -713,14 +973,17 @@ public final class AbolixVpnService extends VpnService {
         running = false;
         closeDefaultInterfaceMonitor();
         defaultInterfaceListener = null;
+        tunInterfaceName = "";
         Object server = commandServer;
         commandServer = null;
         activeConfig = "";
+        // Release Android's TUN fd before asking libbox to tear down the service,
+        // matching the official Android client's lifecycle and avoiding a stale TUN fd.
+        closeTunDescriptor();
         if (server != null) {
             try { invokeNoArg(server, "closeService"); } catch (Exception e) { Log.w(TAG, "closeService", e); }
             try { invokeNoArg(server, "close"); } catch (Exception e) { Log.w(TAG, "close", e); }
         }
-        closeTunDescriptor();
     }
 
     private void stopEngine() {
@@ -765,7 +1028,7 @@ public final class AbolixVpnService extends VpnService {
     private void startForegroundCompat(String message) {
         Notification notification = makeNotification(message);
         if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED);
         } else startForeground(NOTIFICATION_ID, notification);
     }
 
