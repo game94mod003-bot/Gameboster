@@ -73,3 +73,8 @@ base64 -w 0 abolix-release.jks
 - Android Gradle Plugin: 8.5.2
 - Gradle در GitHub Actions: 8.7
 - هسته: sing-box libbox 1.14.4
+
+
+### BuildConfig on AGP 8.x
+
+The app explicitly enables `buildFeatures.buildConfig` because AGP 8.x disables generating this class by default.

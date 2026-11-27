@@ -14,6 +14,12 @@ android {
     namespace 'com.abolix.gamebooster'
     compileSdk 34
 
+    // AGP 8.x disables BuildConfig generation by default. AbolixVpnService
+    // uses BuildConfig.DEBUG, VERSION_CODE and VERSION_NAME during libbox setup.
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
         applicationId 'com.abolix.gamebooster'
         minSdk 24

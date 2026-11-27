@@ -26,3 +26,7 @@
 
 ## Not claimed
 This workspace has no Android SDK, Gradle executable, emulator, or Android device. Therefore no APK compilation, libbox JNI runtime test, real VPN handshake, traffic-forwarding test, or on-device protocol test is claimed. GitHub Actions runs the importer unit tests and Android assemble task; final connection validation still requires the user's device and a live working subscription.
+
+## BuildConfig generation (AGP 8.x)
+
+Enabled `android.buildFeatures.buildConfig` in `app/build.gradle`. Android Gradle Plugin 8.0+ disables `BuildConfig` generation by default, while `AbolixVpnService` reads `BuildConfig.DEBUG`, `BuildConfig.VERSION_CODE`, and `BuildConfig.VERSION_NAME` when initializing libbox. This fixes the reported `cannot find symbol: BuildConfig` compile failure for both debug and release variants.
