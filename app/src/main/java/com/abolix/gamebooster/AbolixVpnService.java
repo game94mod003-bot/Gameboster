@@ -98,7 +98,13 @@ public final class AbolixVpnService extends VpnService {
             lifecycleGeneration++;
             starting = false;
         }
-        stopEngine();
+        // State is written by the explicit stop/revoke/error path. Do not emit a
+        // generic "disconnected" event here: that used to overwrite the useful
+        // startup error immediately after stopSelf() was called.
+        synchronized (coreLock) {
+            closeEngineCore();
+            stopForeground(true);
+        }
         defaultInterfaceListener = null;
         if (instance == this) instance = null;
         super.onDestroy();
@@ -135,7 +141,24 @@ public final class AbolixVpnService extends VpnService {
             starting = true;
             startGeneration = ++lifecycleGeneration;
         }
-        startForegroundCompat("در حال اتصال · " + requestedNode);
+        try {
+            // Promote the service immediately: Android 8+ may terminate a service
+            // started with startForegroundService() if this call is delayed.
+            startForegroundCompat("در حال اتصال · " + requestedNode);
+        } catch (Throwable foregroundError) {
+            synchronized (this) {
+                if (lifecycleGeneration == startGeneration) {
+                    lifecycleGeneration++;
+                    starting = false;
+                }
+            }
+            String message = "اندروید اجازه‌ی اجرای سرویس VPN در پیش‌زمینه را نداد: " + safeMessage(foregroundError);
+            Log.e(TAG, message, foregroundError);
+            broadcastState(false, message);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+        broadcastConnectingStatus("در حال اتصال به " + requestedNode + "…");
         armStartupWatchdog(startGeneration);
         new Thread(() -> {
             try {
@@ -189,6 +212,7 @@ public final class AbolixVpnService extends VpnService {
                 new Thread(() -> {
                     synchronized (coreLock) { closeEngineCore(); }
                     stopForeground(true);
+                    stopSelf();
                 }, "Abolix-Core-Timeout-Cleanup").start();
             }
         };
@@ -592,7 +616,7 @@ public final class AbolixVpnService extends VpnService {
         startupStage = stage;
         Log.i(TAG, "Startup: " + stage);
         updateNotification("راه‌اندازی هسته · " + stage);
-        broadcastState(false, "راه‌اندازی هسته: " + stage);
+        broadcastConnectingStatus("راه‌اندازی هسته: " + stage);
     }
 
     private static void setPropertyRequired(Object target, String property, Object value) throws Exception {
@@ -1004,16 +1028,35 @@ public final class AbolixVpnService extends VpnService {
 
     private void stopWithError(String message) {
         Log.e(TAG, message);
-        stopEngine();
+        cancelStartupWatchdog();
+        synchronized (coreLock) {
+            closeEngineCore();
+            stopForeground(true);
+        }
+        synchronized (this) { starting = false; }
         broadcastState(false, message);
         stopSelf();
     }
 
     private void broadcastState(boolean connected, String message) {
+        broadcastStatus(connected, false, message);
+    }
+
+    private void broadcastConnectingStatus(String message) {
+        broadcastStatus(false, true, message);
+    }
+
+    private void broadcastStatus(boolean connected, boolean connecting, String message) {
         android.content.SharedPreferences prefs = getSharedPreferences("abolix_secure_store", MODE_PRIVATE);
-        prefs.edit().putBoolean("vpn_connected", connected).putString("vpn_status", message).apply();
+        prefs.edit()
+                .putBoolean("vpn_connected", connected)
+                .putBoolean("vpn_connecting", connecting)
+                .putString("vpn_status", message == null ? "" : message)
+                .apply();
         Intent state = new Intent(ACTION_STATE).setPackage(getPackageName());
-        state.putExtra("connected", connected).putExtra("message", message);
+        state.putExtra("connected", connected)
+                .putExtra("connecting", connecting)
+                .putExtra("message", message);
         sendBroadcast(state);
     }
 

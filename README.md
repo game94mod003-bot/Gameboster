@@ -78,3 +78,15 @@ base64 -w 0 abolix-release.jks
 ### BuildConfig on AGP 8.x
 
 The app explicitly enables `buildFeatures.buildConfig` because AGP 8.x disables generating this class by default.
+
+
+## Connection lifecycle update
+
+- VPN startup stages are now represented as `connecting=true`, not as disconnected states.
+- The dashboard updates connection labels in place; it no longer rebuilds the entire page for every core startup callback.
+- The Connect button is disabled while startup is pending to prevent duplicate start requests.
+- The VPN permission result is checked again with `VpnService.prepare()` before the service starts.
+- Foreground-service startup exceptions are surfaced on screen instead of silently appearing as a sent request.
+- `onDestroy()` no longer overwrites a useful core startup error with a generic disconnected status.
+
+Android's documented permission order is `VpnService.prepare()` → user consent → start the VPN service → establish the TUN interface. See the Android VPN guide.

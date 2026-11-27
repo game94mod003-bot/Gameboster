@@ -30,3 +30,16 @@ This workspace has no Android SDK, Gradle executable, emulator, or Android devic
 ## BuildConfig generation (AGP 8.x)
 
 Enabled `android.buildFeatures.buildConfig` in `app/build.gradle`. Android Gradle Plugin 8.0+ disables `BuildConfig` generation by default, while `AbolixVpnService` reads `BuildConfig.DEBUG`, `BuildConfig.VERSION_CODE`, and `BuildConfig.VERSION_NAME` when initializing libbox. This fixes the reported `cannot find symbol: BuildConfig` compile failure for both debug and release variants.
+
+
+## VPN button / repeated dashboard reset
+
+- Fixed a state-model bug: every `setStartupStage()` call previously wrote `vpn_connected=false` and triggered a receiver that called `renderPage()`. This made the dashboard jump to the top repeatedly and could hide the actual engine failure. Startup events now use a separate `vpn_connecting=true` state.
+- The Activity receiver updates existing labels and the Connect button without recreating the page.
+- The connection button is disabled while starting, avoiding duplicate service starts.
+- After the Android consent dialog returns `RESULT_OK`, the Activity rechecks `VpnService.prepare()` before starting the service.
+- Foreground-service startup failures are caught and displayed.
+- `onDestroy()` no longer overwrites the detailed error state with a generic "disconnected" message.
+- Startup watchdog cleanup now stops the service after closing the engine.
+
+Validation limitation: this environment does not contain Android SDK/Gradle or a physical Android device, so the final Android build and VPN handshake still need the GitHub Actions runner and the user's device.

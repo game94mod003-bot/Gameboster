@@ -80,6 +80,10 @@ public final class MainActivity extends Activity {
     private LinearLayout page;
     private LinearLayout bottomBar;
     private TextView headerStatus;
+    private TextView headerIndicator;
+    private TextView connectionTitle;
+    private TextView connectionIndicator;
+    private Button connectButton;
     private TextView selectedNodeText;
     private TextView connectionState;
     private TextView downSpeedText;
@@ -93,7 +97,9 @@ public final class MainActivity extends Activity {
     private EditText subscriptionUrlField;
     private String currentSection = "home";
     private boolean connected;
+    private boolean connecting;
     private boolean pendingConnect;
+    private String currentVpnStatus = "";
     private boolean receiverRegistered;
     private boolean refreshInFlight;
     private long lastAutoRefreshAttempt;
@@ -109,9 +115,9 @@ public final class MainActivity extends Activity {
     private final BroadcastReceiver vpnReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             connected = intent.getBooleanExtra("connected", false);
+            connecting = intent.getBooleanExtra("connecting", false);
             String message = intent.getStringExtra("message");
             updateConnectionLabels(message);
-            if ("home".equals(currentSection)) renderPage();
         }
     };
 
@@ -119,7 +125,10 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(0xff080b14);
         getWindow().setNavigationBarColor(0xff080b14);
-        connected = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("vpn_connected", false);
+        android.content.SharedPreferences vpnPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        connected = vpnPrefs.getBoolean("vpn_connected", false);
+        connecting = vpnPrefs.getBoolean("vpn_connecting", false);
+        currentVpnStatus = vpnPrefs.getString("vpn_status", "");
         buildShell();
         renderPage();
         askNotificationPermission();
@@ -129,8 +138,9 @@ public final class MainActivity extends Activity {
         super.onResume();
         android.content.SharedPreferences vpnPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         connected = vpnPrefs.getBoolean("vpn_connected", false);
-        String savedStatus = vpnPrefs.getString("vpn_status", "");
-        if (connectionState != null && !savedStatus.isEmpty()) connectionState.setText(savedStatus);
+        connecting = vpnPrefs.getBoolean("vpn_connecting", false);
+        currentVpnStatus = vpnPrefs.getString("vpn_status", "");
+        updateConnectionLabels(currentVpnStatus);
         registerVpnReceiver();
         handler.removeCallbacks(trafficRunnable);
         handler.post(trafficRunnable);
@@ -170,9 +180,9 @@ public final class MainActivity extends Activity {
         headerStatus = text("اتصال امن و هوشمند", 11, 0xff91a0b7, false);
         titleBox.addView(headerStatus);
         header.addView(titleBox, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView topState = text("●", 14, ACCENTS[accentIndex()], true);
-        topState.setGravity(Gravity.CENTER);
-        header.addView(topState, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        headerIndicator = text("●", 14, ACCENTS[accentIndex()], true);
+        headerIndicator.setGravity(Gravity.CENTER);
+        header.addView(headerIndicator, new LinearLayout.LayoutParams(dp(28), dp(28)));
         root.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
         FrameLayout contentFrame = new FrameLayout(this);
@@ -246,12 +256,16 @@ public final class MainActivity extends Activity {
         LinearLayout top = row();
         LinearLayout status = new LinearLayout(this);
         status.setOrientation(LinearLayout.VERTICAL);
-        status.addView(text(connected ? "تونل فعال است" : "آماده‌ی اتصال", 17, Color.WHITE, true));
-        connectionState = text(connected ? "مسیر امن روشن است" : "یک سرور انتخاب کن و متصل شو", 12, 0xff9aa8bd, false);
+        connectionTitle = text(connected ? "تونل فعال است" : (connecting ? "در حال اتصال…" : "آماده‌ی اتصال"), 17, Color.WHITE, true);
+        status.addView(connectionTitle);
+        connectionState = text(currentVpnStatus.isEmpty()
+                ? (connected ? "مسیر امن روشن است" : (connecting ? "درخواست راه‌اندازی هسته ارسال شد…" : "یک سرور انتخاب کن و متصل شو"))
+                : currentVpnStatus, 12, 0xff9aa8bd, false);
         status.addView(connectionState);
         top.addView(status, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView indicator = text(connected ? "●" : "○", 26, connected ? ACCENTS[accentIndex()] : 0xff64748b, true);
-        top.addView(indicator);
+        connectionIndicator = text(connected ? "●" : (connecting ? "◌" : "○"), 26,
+                connected ? ACCENTS[accentIndex()] : (connecting ? 0xffffb86b : 0xff64748b), true);
+        top.addView(connectionIndicator);
         card.addView(top);
         addGap(card, 14);
 
@@ -259,9 +273,11 @@ public final class MainActivity extends Activity {
         selectedNodeText = text(node == null ? "هیچ سروری انتخاب نشده" : node.getName() + "  ·  " + node.getProtocol().toUpperCase(Locale.ROOT), 13, 0xffd9e3f2, true);
         card.addView(selectedNodeText);
         addGap(card, 13);
-        Button connect = button(connected ? "قطع اتصال" : "اتصال امن", connected ? 0xffe45f7e : ACCENTS[accentIndex()]);
-        connect.setOnClickListener(v -> toggleConnection());
-        card.addView(connect, new LinearLayout.LayoutParams(-1, dp(48)));
+        connectButton = button(connected ? "قطع اتصال" : (connecting ? "در حال اتصال…" : "اتصال امن"),
+                connected ? 0xffe45f7e : (connecting ? 0xff596579 : ACCENTS[accentIndex()]));
+        connectButton.setEnabled(!connecting);
+        connectButton.setOnClickListener(v -> toggleConnection());
+        card.addView(connectButton, new LinearLayout.LayoutParams(-1, dp(48)));
         return card;
     }
 
@@ -478,11 +494,18 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleConnection() {
+        if (connecting) return;
         if (connected) {
-            AbolixVpnService.stop(this);
+            connecting = false;
             connected = false;
-            updateConnectionLabels("در حال قطع اتصال");
-            renderPage();
+            setLocalVpnStatus(false, false, "در حال قطع اتصال…");
+            updateConnectionLabels(currentVpnStatus);
+            try {
+                AbolixVpnService.stop(this);
+            } catch (RuntimeException error) {
+                setLocalVpnStatus(false, false, "قطع اتصال ناموفق بود: " + concise(error));
+                updateConnectionLabels(currentVpnStatus);
+            }
             return;
         }
         ProxyNode node = selectedNode();
@@ -493,7 +516,13 @@ public final class MainActivity extends Activity {
         Intent permission = VpnService.prepare(this);
         if (permission != null) {
             pendingConnect = true;
-            startActivityForResult(permission, REQUEST_VPN);
+            try {
+                startActivityForResult(permission, REQUEST_VPN);
+            } catch (RuntimeException error) {
+                pendingConnect = false;
+                setLocalVpnStatus(false, false, "بازکردن درخواست مجوز VPN ناموفق بود: " + concise(error));
+                updateConnectionLabels(currentVpnStatus);
+            }
         } else startSelectedNode();
     }
 
@@ -502,11 +531,14 @@ public final class MainActivity extends Activity {
         if (node == null) return;
         try {
             String config = SingBoxConfig.build(node, new ArrayList<>(selectedPackages()), getPackageName());
+            setLocalVpnStatus(false, true, "در حال ارسال درخواست اتصال به " + node.getName() + "…");
+            updateConnectionLabels(currentVpnStatus);
             AbolixVpnService.start(this, config, node.getName());
-            if (connectionState != null) connectionState.setText("در حال راه‌اندازی هسته…");
-            Toast.makeText(this, "درخواست اتصال ارسال شد", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "در حال اتصال…", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            Toast.makeText(this, "ساخت پیکربندی ناموفق: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            setLocalVpnStatus(false, false, "شروع اتصال ناموفق بود: " + concise(e));
+            updateConnectionLabels(currentVpnStatus);
+            Toast.makeText(this, currentVpnStatus, Toast.LENGTH_LONG).show();
         }
     }
 
@@ -514,8 +546,26 @@ public final class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_VPN && pendingConnect) {
             pendingConnect = false;
-            if (resultCode == RESULT_OK) startSelectedNode();
-            else Toast.makeText(this, "اجازه‌ی VPN داده نشد", Toast.LENGTH_LONG).show();
+            if (resultCode == RESULT_OK) {
+                // Android may revoke VPN consent when another VPN app is prepared.
+                // Verify the grant again before asking the service to start.
+                Intent stillNeedsConsent = VpnService.prepare(this);
+                if (stillNeedsConsent == null) {
+                    startSelectedNode();
+                } else {
+                    pendingConnect = true;
+                    try { startActivityForResult(stillNeedsConsent, REQUEST_VPN); }
+                    catch (RuntimeException error) {
+                        pendingConnect = false;
+                        setLocalVpnStatus(false, false, "تأیید مجوز VPN کامل نشد: " + concise(error));
+                        updateConnectionLabels(currentVpnStatus);
+                    }
+                }
+            } else {
+                setLocalVpnStatus(false, false, "اجازه‌ی VPN داده نشد؛ برای اتصال باید درخواست سیستم را تأیید کنی.");
+                updateConnectionLabels(currentVpnStatus);
+                Toast.makeText(this, currentVpnStatus, Toast.LENGTH_LONG).show();
+            }
         }
     }
 
@@ -677,9 +727,33 @@ public final class MainActivity extends Activity {
         if (graph != null && "home".equals(currentSection)) graph.addSample(downRate, upRate);
     }
 
+    private void setLocalVpnStatus(boolean isConnected, boolean isConnecting, String message) {
+        connected = isConnected;
+        connecting = isConnecting;
+        currentVpnStatus = message == null ? "" : message;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean("vpn_connected", connected)
+                .putBoolean("vpn_connecting", connecting)
+                .putString("vpn_status", currentVpnStatus)
+                .apply();
+    }
+
     private void updateConnectionLabels(String message) {
-        if (connectionState != null) connectionState.setText(message == null ? (connected ? "تونل فعال است" : "قطع") : message);
-        if (headerStatus != null) headerStatus.setText(connected ? "اتصال برقرار است" : "اتصال امن و هوشمند");
+        if (message != null && !message.trim().isEmpty()) currentVpnStatus = message;
+        String fallback = connected ? "مسیر امن روشن است"
+                : (connecting ? "در حال راه‌اندازی هسته…" : "اتصال برقرار نیست");
+        if (connectionTitle != null) connectionTitle.setText(connected ? "تونل فعال است" : (connecting ? "در حال اتصال…" : "آماده‌ی اتصال"));
+        if (connectionState != null) connectionState.setText(currentVpnStatus.isEmpty() ? fallback : currentVpnStatus);
+        if (connectionIndicator != null) {
+            connectionIndicator.setText(connected ? "●" : (connecting ? "◌" : "○"));
+            connectionIndicator.setTextColor(connected ? ACCENTS[accentIndex()] : (connecting ? 0xffffb86b : 0xff64748b));
+        }
+        if (headerStatus != null) headerStatus.setText(connected ? "اتصال برقرار است" : (connecting ? "در حال راه‌اندازی هسته…" : "اتصال امن و هوشمند"));
+        if (headerIndicator != null) headerIndicator.setTextColor(connected ? ACCENTS[accentIndex()] : (connecting ? 0xffffb86b : 0xff64748b));
+        if (connectButton != null) {
+            connectButton.setText(connected ? "قطع اتصال" : (connecting ? "در حال اتصال…" : "اتصال امن"));
+            connectButton.setEnabled(!connecting);
+        }
     }
 
     private ProxyNode selectedNode() {
