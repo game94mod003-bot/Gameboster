@@ -31,3 +31,8 @@ Reference: https://github.com/SagerNet/sing-box/issues/3585
 - The supplied DNS failure maps to `ABX-DNS-001`.
 
 A complete Android Gradle build and a real VPN connection test must still run in GitHub Actions and on the target device; this local environment has no Android SDK/Gradle installation.
+
+
+## Build fix 1.0.2
+- Fixed Java compile error in `MainActivity.showPendingConnectionError`: report selection now produces an immutable `diagnosticReport` value captured by both AlertDialog lambdas.
+- Bumped app version name to 1.0.2.

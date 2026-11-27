@@ -495,7 +495,7 @@ public final class MainActivity extends Activity {
         LinearLayout info = cardColumn();
         info.addView(text("درباره Abolix", 15, Color.WHITE, true));
         addGap(info, 7);
-        info.addView(text("نسخه 1.0.1 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
+        info.addView(text("نسخه 1.0.2 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
         page.addView(info);
     }
 
@@ -783,8 +783,12 @@ public final class MainActivity extends Activity {
         if (errorId.isEmpty()) errorId = String.valueOf(rawMessage == null ? 0 : rawMessage.hashCode());
         if (errorId.equals(lastShownVpnErrorId)) return;
 
-        String report = prefs.getString("last_vpn_error_report", "");
-        if (report.isEmpty()) report = AbolixDiagnostics.formatReport(this, "صفحه اصلی", rawMessage);
+        String storedReport = prefs.getString("last_vpn_error_report", "");
+        // Lambdas below capture this immutable value; Java requires captured
+        // local variables to be final or effectively final.
+        final String diagnosticReport = storedReport.isEmpty()
+                ? AbolixDiagnostics.formatReport(this, "صفحه اصلی", rawMessage)
+                : storedReport;
         AbolixDiagnostics.Issue issue = AbolixDiagnostics.classify(rawMessage);
         lastShownVpnErrorId = errorId;
         prefs.edit().putBoolean("last_vpn_error_pending", false).apply();
@@ -795,8 +799,8 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("اتصال Abolix برقرار نشد · " + issue.code)
                 .setMessage(visibleMessage)
-                .setPositiveButton("ارسال گزارش برای سازنده", (dialog, which) -> shareDiagnosticReport(report))
-                .setNeutralButton("کپی گزارش", (dialog, which) -> copyDiagnosticReport(report))
+                .setPositiveButton("ارسال گزارش برای سازنده", (dialog, which) -> shareDiagnosticReport(diagnosticReport))
+                .setNeutralButton("کپی گزارش", (dialog, which) -> copyDiagnosticReport(diagnosticReport))
                 .setNegativeButton("بستن", null)
                 .show();
     }
