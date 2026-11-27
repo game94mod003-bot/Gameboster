@@ -8,7 +8,7 @@ def releaseKeyAlias = System.getenv('ABOLIX_KEY_ALIAS')
 def releaseKeyPassword = System.getenv('ABOLIX_KEY_PASSWORD')
 def canSignRelease = releaseKeystore && releaseStorePassword && releaseKeyAlias && releaseKeyPassword && file(releaseKeystore).exists()
 def ciVersionCode = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
-def appVersionName = System.getenv('ABOLIX_VERSION_NAME') ?: '1.0.0'
+def appVersionName = System.getenv('ABOLIX_VERSION_NAME') ?: '1.0.1'
 
 android {
     namespace 'com.abolix.gamebooster'
@@ -28,6 +28,17 @@ android {
         versionName appVersionName
     }
 
+    // sing-box ships native libraries for several CPU architectures. Build only
+    // phone ABIs so each APK contains one libbox binary instead of a universal set.
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'armeabi-v7a'
+            universalApk false
+        }
+    }
+
     signingConfigs {
         if (canSignRelease) {
             release {
@@ -45,7 +56,9 @@ android {
             versionNameSuffix '-debug'
         }
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             if (canSignRelease) signingConfig signingConfigs.release
         }
     }

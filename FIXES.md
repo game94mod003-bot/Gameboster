@@ -1,45 +1,33 @@
-# Abolix reliability update
+# Abolix connection-fix package
 
-## Core startup
-- Replaced the preflight `Libbox.checkConfig()` call with `Libbox.formatConfig()`. `FormatConfig` parses/normalizes the JSON without constructing a second temporary engine with a stub platform TUN. The real `CommandServer.startOrReloadService()` remains the authoritative engine/TUN startup and returns the actual sing-box error.
-- Separated libbox base, working, and temporary directories and create them before `Libbox.setup()`.
-- Added the libbox OOM/power draft initialization hooks used by the official Android sing-box client when those hooks exist in the pinned libbox build.
-- Added startup-stage Logcat/notification/app status updates so the user sees which exact phase is running instead of an opaque spinner.
-- Switched the VPN foreground service to Android's `systemExempted` type and matching permission, following the official sing-box Android VPN service declaration. The VPN service is non-exported.
-- Fixed restoration of VPN status on Activity resume to read the same private preferences written by the service.
+## Fix from the supplied device screenshot
 
-## Importer
-- Added URI-style VMess links (`vmess://uuid@host:port?...`) in addition to the classic Base64 JSON VMess format.
-- Added the `shadowsocks://` alias alongside `ss://`.
-- Added regression tests for both new forms.
-- Fixed a JSONC parser defect that duplicated every character inside quoted JSON strings; this broke sing-box/Xray JSON imports even when the supplied JSON was valid. Added coverage for escaped quotes and `//` inside a JSON string.
+The observed fatal error was:
 
-## Supported format boundary
-- Supported: VLESS (TLS/REALITY, WS, gRPC, HTTP/2, HTTPUpgrade, Vision flow), VMess (Base64 JSON and URI form), Trojan, Shadowsocks SIP002/legacy links, Hysteria/Hysteria2, TUIC, AnyTLS, SOCKS and HTTP(S), Clash YAML, sing-box JSON and supported Xray JSON outbound forms.
-- Not supported by upstream sing-box 1.14.4: ShadowsocksR (`ssr://`) and XHTTP/mKCP transports. These are explicitly rejected rather than silently mis-imported. WireGuard needs the sing-box `endpoints[]` model and is not represented by this app's single-outbound node model yet.
+`start dns/https[cloudflare-doh]: detour to an empty direct outbound makes no sense`
 
-## Validation performed in this workspace
-- ZIP integrity and file inventory checks.
-- XML parsing of AndroidManifest.xml and resource XML.
-- YAML parsing of GitHub Actions workflow.
-- Source-level review against sing-box/libbox 1.14.x API and the official Android client implementation.
+The app-generated `SingBoxConfig` attached `"detour": "direct"` to a new-format HTTPS DNS server. That field is removed. sing-box 1.14 DNS server dialers already use the default dialer; an explicit detour to an empty direct outbound is invalid.
 
-## Not claimed
-This workspace has no Android SDK, Gradle executable, emulator, or Android device. Therefore no APK compilation, libbox JNI runtime test, real VPN handshake, traffic-forwarding test, or on-device protocol test is claimed. GitHub Actions runs the importer unit tests and Android assemble task; final connection validation still requires the user's device and a live working subscription.
+Reference: https://github.com/SagerNet/sing-box/issues/3585
 
-## BuildConfig generation (AGP 8.x)
+## Error reporting
 
-Enabled `android.buildFeatures.buildConfig` in `app/build.gradle`. Android Gradle Plugin 8.0+ disables `BuildConfig` generation by default, while `AbolixVpnService` reads `BuildConfig.DEBUG`, `BuildConfig.VERSION_CODE`, and `BuildConfig.VERSION_NAME` when initializing libbox. This fixes the reported `cannot find symbol: BuildConfig` compile failure for both debug and release variants.
+- 67 local signatures classify common DNS, network, TLS, Reality, VPN, libbox, profile, subscription, and Android failures.
+- Connection failures create a persistent diagnostic report and a high-priority Android notification.
+- When the app is open, it displays a dialog with error code, explanation, next step, and actions to share/copy the report.
+- Report fields: timestamp, app version, device manufacturer/model, Android version, startup stage, classified issue and sanitized error.
+- Share is always user-initiated. Profile links, UUIDs, credentials and complete configuration are redacted/omitted.
 
+## Smaller APK output
 
-## VPN button / repeated dashboard reset
+- Gradle produces `arm64-v8a` and `armeabi-v7a` APKs separately; no universal APK is produced.
+- Release builds run R8 and resource shrinking, with keep rules for the reflectively accessed libbox API.
+- Use the arm64 APK on most current Android phones; use armeabi-v7a only on 32-bit ARM devices.
 
-- Fixed a state-model bug: every `setStartupStage()` call previously wrote `vpn_connected=false` and triggered a receiver that called `renderPage()`. This made the dashboard jump to the top repeatedly and could hide the actual engine failure. Startup events now use a separate `vpn_connecting=true` state.
-- The Activity receiver updates existing labels and the Connect button without recreating the page.
-- The connection button is disabled while starting, avoiding duplicate service starts.
-- After the Android consent dialog returns `RESULT_OK`, the Activity rechecks `VpnService.prepare()` before starting the service.
-- Foreground-service startup failures are caught and displayed.
-- `onDestroy()` no longer overwrites the detailed error state with a generic "disconnected" message.
-- Startup watchdog cleanup now stops the service after closing the engine.
+## Regression checks added
 
-Validation limitation: this environment does not contain Android SDK/Gradle or a physical Android device, so the final Android build and VPN handshake still need the GitHub Actions runner and the user's device.
+- Generated HTTPS DNS has no `detour` property.
+- The diagnostic signature catalog contains at least 50 cases.
+- The supplied DNS failure maps to `ABX-DNS-001`.
+
+A complete Android Gradle build and a real VPN connection test must still run in GitHub Actions and on the target device; this local environment has no Android SDK/Gradle installation.

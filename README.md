@@ -90,3 +90,12 @@ The app explicitly enables `buildFeatures.buildConfig` because AGP 8.x disables 
 - `onDestroy()` no longer overwrites a useful core startup error with a generic disconnected status.
 
 Android's documented permission order is `VpnService.prepare()` → user consent → start the VPN service → establish the TUN interface. See the Android VPN guide.
+
+
+## Connection-fix build 1.0.1 (DNS + diagnostics + smaller APK)
+
+- Generated Cloudflare HTTPS DNS no longer has `"detour": "direct"`. sing-box 1.14's new DNS server format must use the DNS server's default dialer here; pointing it at an empty `direct` outbound causes `detour to an empty direct outbound makes no sense`. See the sing-box issue and resolution: https://github.com/SagerNet/sing-box/issues/3585
+- Failed starts are classified against 67 local error signatures. Abolix shows an in-app error dialog and a high-priority notification. The dialog offers **Share report** and **Copy report**. Reports omit profile links, UUIDs, passwords, and the full proxy configuration. Nothing is sent automatically; the user chooses whether and where to share it.
+- APKs are split into `arm64-v8a` and `armeabi-v7a` builds; no universal APK is produced. Most recent Android phones use `arm64-v8a`. This prevents shipping multiple CPU copies of the native libbox library in each install.
+- Release builds enable R8 code shrinking and resource shrinking; libbox Java API symbols are kept because the Android bridge calls them reflectively.
+- CI regression tests cover the generated DNS detour and diagnostic classification.

@@ -103,6 +103,7 @@ public final class MainActivity extends Activity {
     private boolean receiverRegistered;
     private boolean refreshInFlight;
     private long lastAutoRefreshAttempt;
+    private String lastShownVpnErrorId = "";
     private long lastRx = TrafficStats.getUidRxBytes(Process.myUid());
     private long lastTx = TrafficStats.getUidTxBytes(Process.myUid());
     private long lastTrafficSample = System.currentTimeMillis();
@@ -118,6 +119,10 @@ public final class MainActivity extends Activity {
             connecting = intent.getBooleanExtra("connecting", false);
             String message = intent.getStringExtra("message");
             updateConnectionLabels(message);
+            if (!connected && !connecting && message != null && !message.trim().isEmpty()
+                    && !"قطع شد".equals(message.trim())) {
+                handler.post(() -> showPendingConnectionError(message));
+            }
         }
     };
 
@@ -142,9 +147,18 @@ public final class MainActivity extends Activity {
         currentVpnStatus = vpnPrefs.getString("vpn_status", "");
         updateConnectionLabels(currentVpnStatus);
         registerVpnReceiver();
+        showStoredConnectionErrorIfPending();
         handler.removeCallbacks(trafficRunnable);
         handler.post(trafficRunnable);
         autoRefreshOnEntry();
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && "com.abolix.gamebooster.action.SHOW_ERROR_REPORT".equals(intent.getAction())) {
+            handler.post(this::showStoredConnectionErrorIfPending);
+        }
     }
 
     @Override protected void onPause() {
@@ -481,7 +495,7 @@ public final class MainActivity extends Activity {
         LinearLayout info = cardColumn();
         info.addView(text("درباره Abolix", 15, Color.WHITE, true));
         addGap(info, 7);
-        info.addView(text("نسخه 1.0.0 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
+        info.addView(text("نسخه 1.0.1 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
         page.addView(info);
     }
 
@@ -753,6 +767,60 @@ public final class MainActivity extends Activity {
         if (connectButton != null) {
             connectButton.setText(connected ? "قطع اتصال" : (connecting ? "در حال اتصال…" : "اتصال امن"));
             connectButton.setEnabled(!connecting);
+        }
+    }
+
+    private void showStoredConnectionErrorIfPending() {
+        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (!prefs.getBoolean("last_vpn_error_pending", false)) return;
+        showPendingConnectionError(prefs.getString("last_vpn_error_message", currentVpnStatus));
+    }
+
+    private void showPendingConnectionError(String rawMessage) {
+        if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
+        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String errorId = prefs.getString("last_vpn_error_id", "");
+        if (errorId.isEmpty()) errorId = String.valueOf(rawMessage == null ? 0 : rawMessage.hashCode());
+        if (errorId.equals(lastShownVpnErrorId)) return;
+
+        String report = prefs.getString("last_vpn_error_report", "");
+        if (report.isEmpty()) report = AbolixDiagnostics.formatReport(this, "صفحه اصلی", rawMessage);
+        AbolixDiagnostics.Issue issue = AbolixDiagnostics.classify(rawMessage);
+        lastShownVpnErrorId = errorId;
+        prefs.edit().putBoolean("last_vpn_error_pending", false).apply();
+
+        String visibleMessage = issue.title + "\n\n" + issue.suggestion
+                + "\n\nخطای اصلی:\n" + (rawMessage == null ? "خطای نامشخص" : rawMessage)
+                + "\n\nگزارش تشخیصی شامل لینک اشتراک، UUID یا رمز کانفیگ نیست. فقط با انتخاب خودت به اشتراک گذاشته می‌شود.";
+        new AlertDialog.Builder(this)
+                .setTitle("اتصال Abolix برقرار نشد · " + issue.code)
+                .setMessage(visibleMessage)
+                .setPositiveButton("ارسال گزارش برای سازنده", (dialog, which) -> shareDiagnosticReport(report))
+                .setNeutralButton("کپی گزارش", (dialog, which) -> copyDiagnosticReport(report))
+                .setNegativeButton("بستن", null)
+                .show();
+    }
+
+    private void shareDiagnosticReport(String report) {
+        try {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_SUBJECT, "Abolix connection issue report");
+            send.putExtra(Intent.EXTRA_TEXT, report);
+            startActivity(Intent.createChooser(send, "ارسال گزارش خطای Abolix"));
+        } catch (RuntimeException error) {
+            Toast.makeText(this, "بازکردن برنامه اشتراک‌گذاری ممکن نشد: " + concise(error), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void copyDiagnosticReport(String report) {
+        try {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard == null) throw new IllegalStateException("Clipboard در دسترس نیست");
+            clipboard.setPrimaryClip(ClipData.newPlainText("Abolix diagnostic report", report));
+            Toast.makeText(this, "گزارش خطا کپی شد", Toast.LENGTH_SHORT).show();
+        } catch (RuntimeException error) {
+            Toast.makeText(this, "کپی گزارش ناموفق بود: " + concise(error), Toast.LENGTH_LONG).show();
         }
     }
 
