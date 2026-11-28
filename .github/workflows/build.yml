@@ -1,4 +1,4 @@
-name: Abolix Android Build
+name: Abolix Android Build + Game Center
 
 on:
   push:
@@ -12,8 +12,9 @@ permissions:
 
 jobs:
   android:
-    name: Build signed release or debug fallback
+    name: Test and build Android APKs
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -29,9 +30,13 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.7'
+          cache-provider: basic
 
-      - name: Run configuration and diagnostics regression tests
+      - name: Run unit tests (importer + Game Center)
         run: gradle --no-daemon :app:testDebugUnitTest
+
+      - name: Assemble debug APK (always)
+        run: gradle --no-daemon :app:assembleDebug
 
       - name: Set release version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -66,34 +71,11 @@ jobs:
         if: steps.signing.outputs.variant == 'release'
         run: gradle --no-daemon :app:assembleRelease
 
-      - name: Assemble debug APK fallback
-        if: steps.signing.outputs.variant == 'debug'
-        run: gradle --no-daemon :app:assembleDebug
-
-      - name: List device-specific APKs
-        shell: bash
-        run: |
-          set -euo pipefail
-          find "app/build/outputs/apk/${{ steps.signing.outputs.variant }}" -maxdepth 1 -type f -name '*.apk' -printf '%f  %k KB\n' | tee /tmp/abolix-apks.txt
-          echo "### Device-specific APKs" >> "$GITHUB_STEP_SUMMARY"
-          echo 'Choose **arm64-v8a** for most recent Android phones. Choose **armeabi-v7a** only for an older 32-bit ARM device. No universal APK is generated.' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat /tmp/abolix-apks.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload ARM64 APK (most current Android phones)
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v7
         with:
-          name: abolix-${{ steps.signing.outputs.variant }}-arm64-v8a
-          path: app/build/outputs/apk/${{ steps.signing.outputs.variant }}/*arm64-v8a*.apk
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload 32-bit ARM APK (older Android phones)
-        uses: actions/upload-artifact@v7
-        with:
-          name: abolix-${{ steps.signing.outputs.variant }}-armeabi-v7a
-          path: app/build/outputs/apk/${{ steps.signing.outputs.variant }}/*armeabi-v7a*.apk
+          name: abolix-${{ steps.signing.outputs.variant }}-apk
+          path: app/build/outputs/apk/${{ steps.signing.outputs.variant }}/*.apk
           if-no-files-found: error
           retention-days: 14
 

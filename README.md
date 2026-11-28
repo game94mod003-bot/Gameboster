@@ -1,9 +1,20 @@
-# Abolix — کلاینت VPN اندروید
+# Abolix — Game Center و کلاینت VPN اندروید
 
 **Abolix** یک کلاینت اندرویدی بر پایه‌ی هسته‌ی رسمی **sing-box libbox 1.14.4** است. ساختار Java/Gradle پروژه و الگوی بیلد بدون Gradle Wrapper از ZIP نمونه‌ی ارسالی حفظ شده‌اند.
 
 ## امکانات پیاده‌سازی‌شده
 
+### Game Center / Booster
+- انتخاب و اجرای برنامه از فهرست اپ‌هایی که Activity لانچر دارند؛ بدون مجوز پرخطر `QUERY_ALL_PACKAGES`.
+- پروفایل توصیه‌ای خودکار بر اساس وضعیت حرارتی سیستم، RAM آزاد، حالت ذخیره‌ی نیرو و درصد باتری؛ همچنین پروفایل‌های دستی عملکرد، متعادل، خنک‌سازی و صرفه‌جویی.
+- پایش دوره‌ای RAM کل/آزاد، وضعیت حرارتی رسمی Android، دمای حسگر باتری، شارژ، Power Saver، نرخ نوسازی فعلی/بیشینه‌ی نمایشگر و رزولوشن.
+- میانبر به تنظیمات نمایشگر، باتری و اطلاعات اپ انتخابی؛ هشدار پیش از اجرای بازی هنگام گزارش دمای شدید.
+- بررسی دوره‌ای در زمان باز بودن صفحه‌ی Booster با فاصله‌ی ۵ ثانیه و توقف پایش هنگام خروج از صفحه/برنامه.
+- تست واحد برای منطق انتخاب پروفایل و حالت‌های حرارتی/حافظه/باتری.
+
+**مرز فنی مهم:** این برنامه یک اپ عادی اندروید است؛ نمی‌تواند به‌صورت عمومی CPU/GPU یا تنظیمات گرافیکی پردازش بازی‌های دیگر را کنترل کند، برنامه‌های دیگر را بی‌اجازه ببندد یا FPS داخلی آن‌ها را بخواند. نرخ نوسازی نمایشگر (Hz) با FPS رندرشده‌ی بازی یکسان نیست. «۵۰۰ روش مستقل افزایش FPS» از طریق API عمومی اندروید قابل اجرا نیست؛ به‌جای شمارش ساختگی، پایش و توصیه‌های قابل‌اندازه‌گیری پیاده‌سازی شده‌اند. Game Mode اندروید نیز برای خود بازی و تعامل سازنده‌ی همان بازی/سیستم طراحی شده است، نه برای اعمال آزادانه‌ی تغییرات از یک Booster خارجی.
+
+### VPN
 - اتصال VPN اندروید با `VpnService` و TUN واقعی مبتنی بر libbox.
 - خواندن لینک‌های تکی و اشتراک: `VLESS` (TLS/REALITY/Vision)، `VMess` (Base64 JSON و URI)، `Trojan`، `Shadowsocks`، `Hysteria`/`Hysteria2`، `TUIC`، `AnyTLS`، `SOCKS` و `HTTP(S)`.
 - واردکردن Clash YAML، sing-box JSON و قالب‌های متداول Xray JSON.
@@ -20,8 +31,8 @@
 ## ساخت APK با GitHub Actions
 
 1. محتویات ZIP را در ریشه‌ی یک مخزن GitHub قرار بده و به شاخه‌ی `main` یا `master` push کن.
-2. از بخش **Actions** گردش‌کار **Abolix Android Build** را اجرا کن.
-3. اگر Secrets امضا تنظیم نشده باشد، فایل `abolix-debug-apk` را از بخش **Artifacts** همان اجرای Workflow دریافت کن.
+2. از بخش **Actions** گردش‌کار **Abolix Android Build + Game Center** را اجرا کن.
+3. گردش‌کار همیشه تست‌های واحد و `assembleDebug` را اجرا می‌کند. اگر Secrets امضا تنظیم نشده باشد، فایل `abolix-debug-apk` را از بخش **Artifacts** همان اجرای Workflow دریافت کن؛ با وجود Secrets معتبر، نسخه‌ی Release امضاشده نیز ساخته و آپلود می‌شود.
 
 ### ساخت Release امضاشده
 
@@ -54,10 +65,13 @@ base64 -w 0 abolix-release.jks
 
 ## محدودیت‌های فنی مهم
 
+- Booster فقط داده‌ها و وضعیت‌هایی را نمایش می‌دهد که API عمومی اندروید در اپ معمولی مجاز می‌داند. بعضی سازندگان، وضعیت حرارتی/نرخ‌های نمایشگر/دمای باتری را محدود یا ناقص گزارش می‌کنند.
+- فهرست انتخاب بازی در عمل فهرست برنامه‌های دارای launcher activity است؛ Android API عمومی و قابل‌اعتماد برای تشخیص genre همه‌ی بازی‌های نصب‌شده ارائه نمی‌کند.
+- پروفایل‌های Booster تصمیم‌یارند و تنظیمات سیستمیِ محافظت‌شده را بدون رضایت کاربر تغییر نمی‌دهند. برای نرخ نوسازی و Battery Saver، کاربر به صفحه‌ی تنظیمات رسمی هدایت می‌شود.
 - این نسخه **یک هسته‌ی sing-box** دارد. هسته‌ی جداگانه‌ی Xray در کنار آن ادغام یا بسته‌بندی نشده است؛ ادعای ادغام دو هسته در این سورس درست نیست. sing-box از خانواده‌پروتکل‌های ذکرشده پشتیبانی می‌کند.
 - تستی که در رابط «پینگ» نامیده شده، زمان برقراری اتصال TCP است، نه ICMP ping. تست سرور از تونل VPN محافظت می‌شود تا وارد حلقه‌ی مسیریابی نشود؛ تست سایت‌ها در زمان اتصال از مسیر فعلی برنامه انجام می‌شود.
 - شمارنده‌های ترافیک مربوط به UID خود Abolix و از زمان روشن‌شدن دستگاه هستند؛ این اعداد لزوماً مصرف تمام برنامه‌های گوشی را نشان نمی‌دهند.
-- انتخاب برنامه در این نسخه به پنج اپ فهرست‌شده محدود است. در حالت بدون انتخاب، تونل کامل دستگاه فعال می‌شود؛ با انتخاب اپ‌ها فقط همان‌ها و خود Abolix وارد تونل می‌شوند.
+- انتخاب برنامه در بخش **تونل VPN** فقط به پنج اپ فهرست‌شده محدود است. فهرست انتخابی Game Center جداگانه از برنامه‌های دارای launcher activity ساخته می‌شود. در VPN، حالت بدون انتخاب یعنی تونل کامل دستگاه؛ با انتخاب اپ‌ها فقط همان‌ها و خود Abolix وارد تونل می‌شوند.
 - حالت کم‌مصرف، دفعات نمونه‌برداری نمودار را کاهش می‌دهد؛ فشرده‌سازی عمومی ترافیک رمزنگاری‌شده ممکن نیست و کاهش واقعی حجم مصرف به پروتکل و سرویس مقصد وابسته است.
 - مسیر DNS-over-HTTPS فقط یک مسیر بازیابی برای حل نام دامنه است؛ اعتبارسنجی TLS خاموش نمی‌شود و محدودیت دسترسی سرور اشتراک دور زده نمی‌شود.
 - `ssr://` (ShadowsocksR)، ترنسپورت‌های XHTTP و mKCP در هسته رسمی sing-box 1.14.4 پشتیبانی نمی‌شوند. WireGuard به مدل `endpoints[]` نیاز دارد و هنوز در مدل تک‌Outbound این اپ پیاده نشده است. موارد ناسازگار به‌جای تبدیل بی‌صدا با پیام روشن رد می‌شوند.
@@ -78,31 +92,3 @@ base64 -w 0 abolix-release.jks
 ### BuildConfig on AGP 8.x
 
 The app explicitly enables `buildFeatures.buildConfig` because AGP 8.x disables generating this class by default.
-
-
-## Connection lifecycle update
-
-- VPN startup stages are now represented as `connecting=true`, not as disconnected states.
-- The dashboard updates connection labels in place; it no longer rebuilds the entire page for every core startup callback.
-- The Connect button is disabled while startup is pending to prevent duplicate start requests.
-- The VPN permission result is checked again with `VpnService.prepare()` before the service starts.
-- Foreground-service startup exceptions are surfaced on screen instead of silently appearing as a sent request.
-- `onDestroy()` no longer overwrites a useful core startup error with a generic disconnected status.
-
-Android's documented permission order is `VpnService.prepare()` → user consent → start the VPN service → establish the TUN interface. See the Android VPN guide.
-
-
-## Connection-fix build 1.0.2 (DNS + diagnostics + smaller APK)
-
-- Generated Cloudflare HTTPS DNS no longer has `"detour": "direct"`. sing-box 1.14's new DNS server format must use the DNS server's default dialer here; pointing it at an empty `direct` outbound causes `detour to an empty direct outbound makes no sense`. See the sing-box issue and resolution: https://github.com/SagerNet/sing-box/issues/3585
-- Failed starts are classified against 67 local error signatures. Abolix shows an in-app error dialog and a high-priority notification. The dialog offers **Share report** and **Copy report**. Reports omit profile links, UUIDs, passwords, and the full proxy configuration. Nothing is sent automatically; the user chooses whether and where to share it.
-- APKs are split into `arm64-v8a` and `armeabi-v7a` builds; no universal APK is produced. Most recent Android phones use `arm64-v8a`. This prevents shipping multiple CPU copies of the native libbox library in each install.
-- Release builds enable R8 code shrinking and resource shrinking; libbox Java API symbols are kept because the Android bridge calls them reflectively.
-- CI regression tests cover the generated DNS detour and diagnostic classification.
-
-
-## Connection stability update 1.0.3
-
-- Physical-uplink discovery now excludes every Android network carrying `TRANSPORT_VPN` and the TUN interface name reported by libbox through `registerMyInterface`. This prevents the active VPN from being offered back to sing-box as a physical network candidate.
-- Added pure-Java regression tests for VPN/TUN filtering and for retaining Wi-Fi/cellular interfaces.
-- This is a source-level routing-loop prevention fix. It does not prove or identify a native process crash without a device crash trace.

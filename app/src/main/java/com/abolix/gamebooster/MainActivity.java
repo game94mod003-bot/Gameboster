@@ -2,6 +2,7 @@ package com.abolix.gamebooster;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -14,12 +15,14 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.TrafficStats;
+import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -80,10 +83,6 @@ public final class MainActivity extends Activity {
     private LinearLayout page;
     private LinearLayout bottomBar;
     private TextView headerStatus;
-    private TextView headerIndicator;
-    private TextView connectionTitle;
-    private TextView connectionIndicator;
-    private Button connectButton;
     private TextView selectedNodeText;
     private TextView connectionState;
     private TextView downSpeedText;
@@ -95,15 +94,16 @@ public final class MainActivity extends Activity {
     private TextView pingText;
     private AbolixGraphView graph;
     private EditText subscriptionUrlField;
+    private TextView boosterGameText;
+    private TextView boosterProfileText;
+    private TextView boosterStatsText;
+    private TextView boosterAdviceText;
     private String currentSection = "home";
     private boolean connected;
-    private boolean connecting;
     private boolean pendingConnect;
-    private String currentVpnStatus = "";
     private boolean receiverRegistered;
     private boolean refreshInFlight;
     private long lastAutoRefreshAttempt;
-    private String lastShownVpnErrorId = "";
     private long lastRx = TrafficStats.getUidRxBytes(Process.myUid());
     private long lastTx = TrafficStats.getUidTxBytes(Process.myUid());
     private long lastTrafficSample = System.currentTimeMillis();
@@ -113,16 +113,20 @@ public final class MainActivity extends Activity {
             handler.postDelayed(this, getPreferences().getBoolean("low_data_mode", true) ? 2000 : 1000);
         }
     };
+    private final Runnable boosterMonitorRunnable = new Runnable() {
+        @Override public void run() {
+            if ("booster".equals(currentSection) && !isFinishing()) {
+                refreshBoosterDashboard();
+                handler.postDelayed(this, 5000L);
+            }
+        }
+    };
     private final BroadcastReceiver vpnReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             connected = intent.getBooleanExtra("connected", false);
-            connecting = intent.getBooleanExtra("connecting", false);
             String message = intent.getStringExtra("message");
             updateConnectionLabels(message);
-            if (!connected && !connecting && message != null && !message.trim().isEmpty()
-                    && !"قطع شد".equals(message.trim())) {
-                handler.post(() -> showPendingConnectionError(message));
-            }
+            if ("home".equals(currentSection)) renderPage();
         }
     };
 
@@ -130,10 +134,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(0xff080b14);
         getWindow().setNavigationBarColor(0xff080b14);
-        android.content.SharedPreferences vpnPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        connected = vpnPrefs.getBoolean("vpn_connected", false);
-        connecting = vpnPrefs.getBoolean("vpn_connecting", false);
-        currentVpnStatus = vpnPrefs.getString("vpn_status", "");
+        connected = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("vpn_connected", false);
         buildShell();
         renderPage();
         askNotificationPermission();
@@ -143,26 +144,19 @@ public final class MainActivity extends Activity {
         super.onResume();
         android.content.SharedPreferences vpnPrefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         connected = vpnPrefs.getBoolean("vpn_connected", false);
-        connecting = vpnPrefs.getBoolean("vpn_connecting", false);
-        currentVpnStatus = vpnPrefs.getString("vpn_status", "");
-        updateConnectionLabels(currentVpnStatus);
+        String savedStatus = vpnPrefs.getString("vpn_status", "");
+        if (connectionState != null && !savedStatus.isEmpty()) connectionState.setText(savedStatus);
         registerVpnReceiver();
-        showStoredConnectionErrorIfPending();
         handler.removeCallbacks(trafficRunnable);
         handler.post(trafficRunnable);
         autoRefreshOnEntry();
-    }
-
-    @Override protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        setIntent(intent);
-        if (intent != null && "com.abolix.gamebooster.action.SHOW_ERROR_REPORT".equals(intent.getAction())) {
-            handler.post(this::showStoredConnectionErrorIfPending);
-        }
+        handler.removeCallbacks(boosterMonitorRunnable);
+        if ("booster".equals(currentSection)) handler.post(boosterMonitorRunnable);
     }
 
     @Override protected void onPause() {
         handler.removeCallbacks(trafficRunnable);
+        handler.removeCallbacks(boosterMonitorRunnable);
         unregisterVpnReceiver();
         super.onPause();
     }
@@ -194,9 +188,9 @@ public final class MainActivity extends Activity {
         headerStatus = text("اتصال امن و هوشمند", 11, 0xff91a0b7, false);
         titleBox.addView(headerStatus);
         header.addView(titleBox, new LinearLayout.LayoutParams(0, -2, 1));
-        headerIndicator = text("●", 14, ACCENTS[accentIndex()], true);
-        headerIndicator.setGravity(Gravity.CENTER);
-        header.addView(headerIndicator, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        TextView topState = text("●", 14, ACCENTS[accentIndex()], true);
+        topState.setGravity(Gravity.CENTER);
+        header.addView(topState, new LinearLayout.LayoutParams(dp(28), dp(28)));
         root.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
         FrameLayout contentFrame = new FrameLayout(this);
@@ -221,7 +215,7 @@ public final class MainActivity extends Activity {
 
     private void buildBottomBar() {
         bottomBar.removeAllViews();
-        String[][] items = {{"home", "⌂", "خانه"}, {"servers", "⇄", "سرورها"}, {"subscription", "↻", "اشتراک"}, {"routing", "◎", "اپ‌ها"}, {"settings", "⚙", "تنظیمات"}};
+        String[][] items = {{"home", "⌂", "خانه"}, {"booster", "⚡", "بازی"}, {"servers", "⇄", "سرورها"}, {"subscription", "↻", "اشتراک"}, {"routing", "◎", "اپ‌ها"}, {"settings", "⚙", "تنظیمات"}};
         for (String[] item : items) {
             boolean active = currentSection.equals(item[0]);
             LinearLayout tab = new LinearLayout(this);
@@ -239,8 +233,10 @@ public final class MainActivity extends Activity {
 
     private void renderPage() {
         if (page == null) return;
+        handler.removeCallbacks(boosterMonitorRunnable);
         page.removeAllViews();
         switch (currentSection) {
+            case "booster": renderBooster(); break;
             case "servers": renderServers(); break;
             case "subscription": renderSubscription(); break;
             case "routing": renderRouting(); break;
@@ -248,6 +244,7 @@ public final class MainActivity extends Activity {
             default: renderHome();
         }
         buildBottomBar();
+        if ("booster".equals(currentSection)) handler.postDelayed(boosterMonitorRunnable, 5000L);
         for (int i = 0; i < page.getChildCount(); i++) {
             View child = page.getChildAt(i);
             child.setAlpha(0f);
@@ -270,16 +267,12 @@ public final class MainActivity extends Activity {
         LinearLayout top = row();
         LinearLayout status = new LinearLayout(this);
         status.setOrientation(LinearLayout.VERTICAL);
-        connectionTitle = text(connected ? "تونل فعال است" : (connecting ? "در حال اتصال…" : "آماده‌ی اتصال"), 17, Color.WHITE, true);
-        status.addView(connectionTitle);
-        connectionState = text(currentVpnStatus.isEmpty()
-                ? (connected ? "مسیر امن روشن است" : (connecting ? "درخواست راه‌اندازی هسته ارسال شد…" : "یک سرور انتخاب کن و متصل شو"))
-                : currentVpnStatus, 12, 0xff9aa8bd, false);
+        status.addView(text(connected ? "تونل فعال است" : "آماده‌ی اتصال", 17, Color.WHITE, true));
+        connectionState = text(connected ? "مسیر امن روشن است" : "یک سرور انتخاب کن و متصل شو", 12, 0xff9aa8bd, false);
         status.addView(connectionState);
         top.addView(status, new LinearLayout.LayoutParams(0, -2, 1));
-        connectionIndicator = text(connected ? "●" : (connecting ? "◌" : "○"), 26,
-                connected ? ACCENTS[accentIndex()] : (connecting ? 0xffffb86b : 0xff64748b), true);
-        top.addView(connectionIndicator);
+        TextView indicator = text(connected ? "●" : "○", 26, connected ? ACCENTS[accentIndex()] : 0xff64748b, true);
+        top.addView(indicator);
         card.addView(top);
         addGap(card, 14);
 
@@ -287,11 +280,9 @@ public final class MainActivity extends Activity {
         selectedNodeText = text(node == null ? "هیچ سروری انتخاب نشده" : node.getName() + "  ·  " + node.getProtocol().toUpperCase(Locale.ROOT), 13, 0xffd9e3f2, true);
         card.addView(selectedNodeText);
         addGap(card, 13);
-        connectButton = button(connected ? "قطع اتصال" : (connecting ? "در حال اتصال…" : "اتصال امن"),
-                connected ? 0xffe45f7e : (connecting ? 0xff596579 : ACCENTS[accentIndex()]));
-        connectButton.setEnabled(!connecting);
-        connectButton.setOnClickListener(v -> toggleConnection());
-        card.addView(connectButton, new LinearLayout.LayoutParams(-1, dp(48)));
+        Button connect = button(connected ? "قطع اتصال" : "اتصال امن", connected ? 0xffe45f7e : ACCENTS[accentIndex()]);
+        connect.setOnClickListener(v -> toggleConnection());
+        card.addView(connect, new LinearLayout.LayoutParams(-1, dp(48)));
         return card;
     }
 
@@ -461,6 +452,268 @@ public final class MainActivity extends Activity {
         page.addView(reset, new LinearLayout.LayoutParams(-1, dp(44)));
     }
 
+    private void renderBooster() {
+        page.addView(sectionTitle("Game Center", "پایش زنده‌ی گوشی و اجرای سریع بازی‌ها"));
+
+        LinearLayout gameCard = cardColumn();
+        gameCard.addView(text("بازی انتخاب‌شده", 15, Color.WHITE, true));
+        String savedLabel = getPreferences().getString("booster_game_label", "هیچ بازی انتخاب نشده");
+        boosterGameText = text(savedLabel, 13, ACCENTS[accentIndex()], true);
+        addGap(gameCard, 6);
+        gameCard.addView(boosterGameText);
+        addGap(gameCard, 12);
+        LinearLayout gameActions = row();
+        Button chooseGame = button("انتخاب بازی", 0xff293a55);
+        chooseGame.setOnClickListener(v -> chooseBoosterGame());
+        Button launchGame = button("▶  اجرای بازی", ACCENTS[accentIndex()]);
+        launchGame.setOnClickListener(v -> launchSelectedGame());
+        gameActions.addView(chooseGame, new LinearLayout.LayoutParams(0, dp(46), 1));
+        View actionGap = new View(this);
+        gameActions.addView(actionGap, new LinearLayout.LayoutParams(dp(8), 1));
+        gameActions.addView(launchGame, new LinearLayout.LayoutParams(0, dp(46), 1));
+        gameCard.addView(gameActions);
+        page.addView(gameCard);
+
+        LinearLayout profileCard = cardColumn();
+        profileCard.addView(text("مدیریت هوشمند", 15, Color.WHITE, true));
+        addGap(profileCard, 7);
+        boosterProfileText = text("حالت: خودکار", 13, ACCENTS[accentIndex()], true);
+        profileCard.addView(boosterProfileText);
+        addGap(profileCard, 5);
+        profileCard.addView(text("حالت خودکار با توجه به وضعیت حرارتی اندروید، RAM آزاد و ذخیره‌ی نیرو فقط پیشنهاد مناسب می‌دهد؛ تنظیمات داخلی یا کلاک بازی‌های دیگر را تغییر نمی‌دهد.", 11, 0xff9aa8bd, false));
+        addGap(profileCard, 10);
+        Button profileButton = button("انتخاب پروفایل", 0xff293a55);
+        profileButton.setOnClickListener(v -> chooseBoosterProfile());
+        profileCard.addView(profileButton, new LinearLayout.LayoutParams(-1, dp(44)));
+        page.addView(profileCard);
+
+        LinearLayout statsCard = cardColumn();
+        statsCard.addView(text("وضعیت زنده‌ی دستگاه", 15, Color.WHITE, true));
+        addGap(statsCard, 7);
+        boosterStatsText = text("در حال خواندن حسگرهای مجاز اندروید…", 12, 0xffd5deed, false);
+        statsCard.addView(boosterStatsText);
+        page.addView(statsCard);
+
+        LinearLayout adviceCard = cardColumn();
+        adviceCard.addView(text("تحلیل و پیشنهاد خودکار", 15, Color.WHITE, true));
+        addGap(adviceCard, 7);
+        boosterAdviceText = text("در حال تحلیل وضعیت…", 12, 0xffaebbd0, false);
+        adviceCard.addView(boosterAdviceText);
+        page.addView(adviceCard);
+
+        LinearLayout settingsCard = cardColumn();
+        settingsCard.addView(text("میانبرهای تنظیمات سیستم", 15, Color.WHITE, true));
+        addGap(settingsCard, 8);
+        Button displaySettings = button("تنظیمات نمایشگر و نرخ نوسازی", 0xff293a55);
+        displaySettings.setOnClickListener(v -> openBoosterSystemSetting(Settings.ACTION_DISPLAY_SETTINGS, null));
+        settingsCard.addView(displaySettings, new LinearLayout.LayoutParams(-1, dp(43)));
+        addGap(settingsCard, 7);
+        Button batterySettings = button("تنظیمات باتری", 0xff293a55);
+        batterySettings.setOnClickListener(v -> openBoosterSystemSetting(Settings.ACTION_BATTERY_SAVER_SETTINGS, null));
+        settingsCard.addView(batterySettings, new LinearLayout.LayoutParams(-1, dp(43)));
+        addGap(settingsCard, 7);
+        Button appSettings = button("اطلاعات برنامه‌ی انتخاب‌شده", 0xff293a55);
+        appSettings.setOnClickListener(v -> {
+            String packageName = getPreferences().getString("booster_game_package", "");
+            if (packageName.isEmpty()) Toast.makeText(this, "ابتدا یک بازی انتخاب کن", Toast.LENGTH_SHORT).show();
+            else openBoosterSystemSetting(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageName);
+        });
+        settingsCard.addView(appSettings, new LinearLayout.LayoutParams(-1, dp(43)));
+        page.addView(settingsCard);
+
+        page.addView(noteCard("واقعیت فنی اندروید", "این برنامه FPS واقعیِ بازیِ دیگر را از API عمومی اندروید نمی‌خواند، پردازش‌های دیگر را نمی‌بندد و CPU/GPU را اورکلاک نمی‌کند. نرخ نمایشگر با FPS رندرشده‌ی بازی یکی نیست. پایش و توصیه‌ها واقعی‌اند؛ اعمال تغییرات سیستمی در اختیار خود اندروید و سازنده‌ی گوشی است."));
+        refreshBoosterDashboard();
+    }
+
+    private void refreshBoosterDashboard() {
+        if (boosterStatsText == null || boosterAdviceText == null || !"booster".equals(currentSection)) return;
+        GameBoosterManager.Snapshot snapshot = GameBoosterManager.inspect(this);
+        String packageName = getPreferences().getString("booster_game_package", "");
+        String savedLabel = getPreferences().getString("booster_game_label", "هیچ بازی انتخاب نشده");
+        if (boosterGameText != null) {
+            boolean installed = !packageName.isEmpty() && getPackageManager().getLaunchIntentForPackage(packageName) != null;
+            boosterGameText.setText(installed ? savedLabel : "هیچ بازیِ نصب‌شده‌ای انتخاب نشده");
+        }
+
+        String requestedMode = getPreferences().getString(boosterModePreferenceKey(), "AUTO");
+        GameBoosterAdvisor.Profile profile = resolveBoosterProfile(requestedMode, snapshot);
+        if (boosterProfileText != null) {
+            boosterProfileText.setText("حالت: " + ("AUTO".equals(requestedMode) ? "خودکار · " : "دستی · ")
+                    + GameBoosterAdvisor.title(profile));
+        }
+
+        StringBuilder stats = new StringBuilder();
+        stats.append("RAM کل: ").append(snapshot.totalRamBytes > 0 ? bytesText(snapshot.totalRamBytes) : "ناموجود")
+                .append("\nRAM آزاد: ").append(snapshot.availableRamBytes > 0 ? bytesText(snapshot.availableRamBytes) : "ناموجود")
+                .append(snapshot.lowMemory ? "  ·  هشدار کمبود حافظه" : "")
+                .append("\nوضعیت حرارتی اندروید: ").append(thermalLabel(snapshot.thermalStatus))
+                .append("\nباتری: ").append(snapshot.batteryPercent >= 0 ? snapshot.batteryPercent + "%" : "ناموجود")
+                .append(snapshot.charging ? "  ·  در حال شارژ" : "")
+                .append("\nدمای حسگر باتری: ").append(snapshot.batteryTemperatureTenthsC >= 0
+                        ? new DecimalFormat("0.0").format(snapshot.batteryTemperatureTenthsC / 10f) + " °C" : "ناموجود")
+                .append("\nسلامت گزارش‌شده‌ی باتری: ").append(batteryHealthLabel(snapshot.batteryHealth))
+                .append("\nحالت ذخیره‌ی نیرو: ").append(snapshot.powerSaveMode ? "روشن" : "خاموش")
+                .append("\nنرخ نوسازی فعلی نمایشگر: ").append(snapshot.currentRefreshRateHz > 0
+                        ? new DecimalFormat("0.#").format(snapshot.currentRefreshRateHz) + " Hz" : "ناموجود")
+                .append("  ·  بیشینه‌ی پشتیبانی‌شده: ").append(snapshot.maxRefreshRateHz > 0
+                        ? new DecimalFormat("0.#").format(snapshot.maxRefreshRateHz) + " Hz" : "ناموجود")
+                .append("\nوضوح نمایشگر: ").append(snapshot.displayWidth > 0 && snapshot.displayHeight > 0
+                        ? snapshot.displayWidth + " × " + snapshot.displayHeight : "ناموجود")
+                .append("\nVPN در Abolix: ").append(connected ? "فعال؛ ممکن است روی تأخیر شبکه اثر بگذارد، نه FPS رندر" : "خاموش");
+        boosterStatsText.setText(stats.toString());
+
+        StringBuilder advice = new StringBuilder(GameBoosterAdvisor.description(profile));
+        boolean hasWarnings = false;
+        if (snapshot.thermalStatus >= 2) {
+            advice.append("\n• دمای سیستم از حالت عادی بالاتر است؛ قبل از فشار بیشتر به گوشی فرصت خنک‌شدن بده.");
+            hasWarnings = true;
+        }
+        if (snapshot.lowMemory || (snapshot.availableRamBytes > 0 && snapshot.availableRamBytes < 1024L * 1024L * 1024L)) {
+            advice.append("\n• حافظه‌ی آزاد پایین است؛ برنامه‌های غیرضروری را از صفحه‌ی Recent Apps دستی ببند.");
+            hasWarnings = true;
+        }
+        if (snapshot.batteryTemperatureTenthsC >= 430) {
+            advice.append("\n• حسگر باتری دمای بالایی گزارش می‌کند؛ هنگام داغی گوشی بازی یا شارژ را متوقف کن تا خنک شود.");
+            hasWarnings = true;
+        }
+        if (snapshot.maxRefreshRateHz > snapshot.currentRefreshRateHz + 1f) {
+            advice.append("\n• نمایشگر نرخ بالاتری را پشتیبانی می‌کند؛ در تنظیمات نمایشگر، حالت نرخ نوسازی بالاتر را بررسی کن. انتخاب سیستم تضمین‌شده نیست.");
+        }
+        if (snapshot.powerSaveMode) {
+            advice.append("\n• Battery Saver روشن است و ممکن است عملکرد یا فعالیت پس‌زمینه را محدود کند.");
+            hasWarnings = true;
+        }
+        if (connected) advice.append("\n• برای بازی آنلاین، مسیر VPN را فقط در صورت نیاز نگه دار؛ VPN می‌تواند پینگ را تغییر دهد اما افزایش FPS ایجاد نمی‌کند.");
+        if (!hasWarnings) advice.append("\n• شاخص‌های موجود فعلاً هشدار مهمی نشان نمی‌دهند.");
+        boosterAdviceText.setText(advice.toString());
+    }
+
+    private GameBoosterAdvisor.Profile resolveBoosterProfile(String mode, GameBoosterManager.Snapshot snapshot) {
+        if ("PERFORMANCE".equals(mode)) return GameBoosterAdvisor.Profile.PERFORMANCE;
+        if ("BALANCED".equals(mode)) return GameBoosterAdvisor.Profile.BALANCED;
+        if ("COOL_DOWN".equals(mode)) return GameBoosterAdvisor.Profile.COOL_DOWN;
+        if ("POWER_SAVER".equals(mode)) return GameBoosterAdvisor.Profile.POWER_SAVER;
+        return GameBoosterAdvisor.recommend(snapshot.thermalStatus, snapshot.availableRamBytes,
+                snapshot.lowMemory, snapshot.powerSaveMode, snapshot.batteryPercent);
+    }
+
+    private String boosterModePreferenceKey() {
+        String packageName = getPreferences().getString("booster_game_package", "");
+        return packageName.isEmpty() ? "booster_mode_default" : "booster_mode_" + packageName;
+    }
+
+    private static String batteryHealthLabel(int health) {
+        switch (health) {
+            case android.os.BatteryManager.BATTERY_HEALTH_GOOD: return "سالم";
+            case android.os.BatteryManager.BATTERY_HEALTH_OVERHEAT: return "بیش‌ازحد گرم";
+            case android.os.BatteryManager.BATTERY_HEALTH_DEAD: return "معیوب/فرسوده";
+            case android.os.BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE: return "ولتاژ نامناسب";
+            case android.os.BatteryManager.BATTERY_HEALTH_UNSPECIFIED_FAILURE: return "خطای گزارش‌شده";
+            case android.os.BatteryManager.BATTERY_HEALTH_COLD: return "بسیار سرد";
+            default: return "گزارش نشده";
+        }
+    }
+
+    private static String thermalLabel(int thermalStatus) {
+        switch (thermalStatus) {
+            case 0: return "عادی";
+            case 1: return "گرمای خفیف";
+            case 2: return "گرمای متوسط";
+            case 3: return "گرمای شدید";
+            case 4: return "بحرانی";
+            case 5: return "اضطراری";
+            case 6: return "نیازمند خاموشی";
+            default: return "در این نسخه/دستگاه در دسترس نیست";
+        }
+    }
+
+    private void chooseBoosterGame() {
+        List<GameBoosterManager.LaunchableApp> apps = GameBoosterManager.findLaunchableApps(this);
+        if (apps.isEmpty()) {
+            Toast.makeText(this, "برنامه‌ی قابل اجرایی پیدا نشد", Toast.LENGTH_LONG).show();
+            return;
+        }
+        String[] labels = new String[apps.size()];
+        for (int i = 0; i < apps.size(); i++) labels[i] = apps.get(i).label;
+        new AlertDialog.Builder(this)
+                .setTitle("بازی یا برنامه را انتخاب کن")
+                .setItems(labels, (dialog, which) -> {
+                    GameBoosterManager.LaunchableApp selected = apps.get(which);
+                    getPreferences().edit()
+                            .putString("booster_game_package", selected.packageName)
+                            .putString("booster_game_label", selected.label)
+                            .apply();
+                    refreshBoosterDashboard();
+                    Toast.makeText(this, selected.label + " انتخاب شد", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void chooseBoosterProfile() {
+        final String[] values = {"AUTO", "PERFORMANCE", "BALANCED", "COOL_DOWN", "POWER_SAVER"};
+        final String[] labels = {"خودکار (پیشنهاد زنده)", "عملکرد", "متعادل", "خنک‌سازی", "صرفه‌جویی باتری"};
+        String preferenceKey = boosterModePreferenceKey();
+        String selected = getPreferences().getString(preferenceKey, "AUTO");
+        int checked = 0;
+        for (int i = 0; i < values.length; i++) if (values[i].equals(selected)) checked = i;
+        new AlertDialog.Builder(this)
+                .setTitle("پروفایل پیشنهادی")
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    getPreferences().edit().putString(preferenceKey, values[which]).apply();
+                    dialog.dismiss();
+                    refreshBoosterDashboard();
+                })
+                .setNegativeButton("بستن", null)
+                .show();
+    }
+
+    private void launchSelectedGame() {
+        String packageName = getPreferences().getString("booster_game_package", "");
+        if (packageName.isEmpty()) {
+            chooseBoosterGame();
+            return;
+        }
+        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
+        if (launchIntent == null) {
+            getPreferences().edit().remove("booster_game_package").remove("booster_game_label").apply();
+            Toast.makeText(this, "این برنامه نصب نیست یا اجرای مستقیم آن مجاز نیست؛ دوباره انتخابش کن", Toast.LENGTH_LONG).show();
+            refreshBoosterDashboard();
+            return;
+        }
+        GameBoosterManager.Snapshot snapshot = GameBoosterManager.inspect(this);
+        if (snapshot.thermalStatus >= 3) {
+            new AlertDialog.Builder(this)
+                    .setTitle("هشدار دمای دستگاه")
+                    .setMessage("اندروید دمای شدید گزارش کرده است. بهتر است قبل از بازی گوشی را خنک کنی. با این حال می‌توانی برنامه را خودت اجرا کنی.")
+                    .setNegativeButton("لغو", null)
+                    .setPositiveButton("ادامه و اجرا", (dialog, which) -> launchGamePackage(packageName))
+                    .show();
+        } else {
+            launchGamePackage(packageName);
+        }
+    }
+
+    private void launchGamePackage(String packageName) {
+        try {
+            Intent launchIntent = getPackageManager().getLaunchIntentForPackage(packageName);
+            if (launchIntent == null) throw new ActivityNotFoundException("Launcher activity unavailable");
+            startActivity(launchIntent);
+        } catch (ActivityNotFoundException | SecurityException error) {
+            Toast.makeText(this, "اجرای برنامه ناموفق بود: " + concise(error), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void openBoosterSystemSetting(String action, String packageName) {
+        Intent intent = new Intent(action);
+        if (packageName != null) intent.setData(Uri.fromParts("package", packageName, null));
+        try {
+            startActivity(intent);
+        } catch (ActivityNotFoundException | SecurityException error) {
+            Toast.makeText(this, "این صفحه‌ی تنظیمات در دستگاهت در دسترس نیست", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void renderSettings() {
         page.addView(sectionTitle("تنظیمات", "شخصی‌سازی تجربه‌ی Abolix"));
         LinearLayout themeCard = cardColumn();
@@ -495,7 +748,7 @@ public final class MainActivity extends Activity {
         LinearLayout info = cardColumn();
         info.addView(text("درباره Abolix", 15, Color.WHITE, true));
         addGap(info, 7);
-        info.addView(text("نسخه 1.0.2 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
+        info.addView(text("نسخه 1.0.0 · هسته sing-box 1.14.4\nپشتیبانی لینک: VLESS، VMess، Trojan، SS، Hysteria2، TUIC، AnyTLS، SOCKS و HTTP\nساخته‌شده برای Android 7+", 11, 0xff9aa8bd, false));
         page.addView(info);
     }
 
@@ -508,18 +761,11 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleConnection() {
-        if (connecting) return;
         if (connected) {
-            connecting = false;
+            AbolixVpnService.stop(this);
             connected = false;
-            setLocalVpnStatus(false, false, "در حال قطع اتصال…");
-            updateConnectionLabels(currentVpnStatus);
-            try {
-                AbolixVpnService.stop(this);
-            } catch (RuntimeException error) {
-                setLocalVpnStatus(false, false, "قطع اتصال ناموفق بود: " + concise(error));
-                updateConnectionLabels(currentVpnStatus);
-            }
+            updateConnectionLabels("در حال قطع اتصال");
+            renderPage();
             return;
         }
         ProxyNode node = selectedNode();
@@ -530,13 +776,7 @@ public final class MainActivity extends Activity {
         Intent permission = VpnService.prepare(this);
         if (permission != null) {
             pendingConnect = true;
-            try {
-                startActivityForResult(permission, REQUEST_VPN);
-            } catch (RuntimeException error) {
-                pendingConnect = false;
-                setLocalVpnStatus(false, false, "بازکردن درخواست مجوز VPN ناموفق بود: " + concise(error));
-                updateConnectionLabels(currentVpnStatus);
-            }
+            startActivityForResult(permission, REQUEST_VPN);
         } else startSelectedNode();
     }
 
@@ -545,14 +785,11 @@ public final class MainActivity extends Activity {
         if (node == null) return;
         try {
             String config = SingBoxConfig.build(node, new ArrayList<>(selectedPackages()), getPackageName());
-            setLocalVpnStatus(false, true, "در حال ارسال درخواست اتصال به " + node.getName() + "…");
-            updateConnectionLabels(currentVpnStatus);
             AbolixVpnService.start(this, config, node.getName());
-            Toast.makeText(this, "در حال اتصال…", Toast.LENGTH_SHORT).show();
+            if (connectionState != null) connectionState.setText("در حال راه‌اندازی هسته…");
+            Toast.makeText(this, "درخواست اتصال ارسال شد", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            setLocalVpnStatus(false, false, "شروع اتصال ناموفق بود: " + concise(e));
-            updateConnectionLabels(currentVpnStatus);
-            Toast.makeText(this, currentVpnStatus, Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "ساخت پیکربندی ناموفق: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -560,26 +797,8 @@ public final class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_VPN && pendingConnect) {
             pendingConnect = false;
-            if (resultCode == RESULT_OK) {
-                // Android may revoke VPN consent when another VPN app is prepared.
-                // Verify the grant again before asking the service to start.
-                Intent stillNeedsConsent = VpnService.prepare(this);
-                if (stillNeedsConsent == null) {
-                    startSelectedNode();
-                } else {
-                    pendingConnect = true;
-                    try { startActivityForResult(stillNeedsConsent, REQUEST_VPN); }
-                    catch (RuntimeException error) {
-                        pendingConnect = false;
-                        setLocalVpnStatus(false, false, "تأیید مجوز VPN کامل نشد: " + concise(error));
-                        updateConnectionLabels(currentVpnStatus);
-                    }
-                }
-            } else {
-                setLocalVpnStatus(false, false, "اجازه‌ی VPN داده نشد؛ برای اتصال باید درخواست سیستم را تأیید کنی.");
-                updateConnectionLabels(currentVpnStatus);
-                Toast.makeText(this, currentVpnStatus, Toast.LENGTH_LONG).show();
-            }
+            if (resultCode == RESULT_OK) startSelectedNode();
+            else Toast.makeText(this, "اجازه‌ی VPN داده نشد", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -741,91 +960,9 @@ public final class MainActivity extends Activity {
         if (graph != null && "home".equals(currentSection)) graph.addSample(downRate, upRate);
     }
 
-    private void setLocalVpnStatus(boolean isConnected, boolean isConnecting, String message) {
-        connected = isConnected;
-        connecting = isConnecting;
-        currentVpnStatus = message == null ? "" : message;
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putBoolean("vpn_connected", connected)
-                .putBoolean("vpn_connecting", connecting)
-                .putString("vpn_status", currentVpnStatus)
-                .apply();
-    }
-
     private void updateConnectionLabels(String message) {
-        if (message != null && !message.trim().isEmpty()) currentVpnStatus = message;
-        String fallback = connected ? "مسیر امن روشن است"
-                : (connecting ? "در حال راه‌اندازی هسته…" : "اتصال برقرار نیست");
-        if (connectionTitle != null) connectionTitle.setText(connected ? "تونل فعال است" : (connecting ? "در حال اتصال…" : "آماده‌ی اتصال"));
-        if (connectionState != null) connectionState.setText(currentVpnStatus.isEmpty() ? fallback : currentVpnStatus);
-        if (connectionIndicator != null) {
-            connectionIndicator.setText(connected ? "●" : (connecting ? "◌" : "○"));
-            connectionIndicator.setTextColor(connected ? ACCENTS[accentIndex()] : (connecting ? 0xffffb86b : 0xff64748b));
-        }
-        if (headerStatus != null) headerStatus.setText(connected ? "اتصال برقرار است" : (connecting ? "در حال راه‌اندازی هسته…" : "اتصال امن و هوشمند"));
-        if (headerIndicator != null) headerIndicator.setTextColor(connected ? ACCENTS[accentIndex()] : (connecting ? 0xffffb86b : 0xff64748b));
-        if (connectButton != null) {
-            connectButton.setText(connected ? "قطع اتصال" : (connecting ? "در حال اتصال…" : "اتصال امن"));
-            connectButton.setEnabled(!connecting);
-        }
-    }
-
-    private void showStoredConnectionErrorIfPending() {
-        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        if (!prefs.getBoolean("last_vpn_error_pending", false)) return;
-        showPendingConnectionError(prefs.getString("last_vpn_error_message", currentVpnStatus));
-    }
-
-    private void showPendingConnectionError(String rawMessage) {
-        if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
-        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String errorId = prefs.getString("last_vpn_error_id", "");
-        if (errorId.isEmpty()) errorId = String.valueOf(rawMessage == null ? 0 : rawMessage.hashCode());
-        if (errorId.equals(lastShownVpnErrorId)) return;
-
-        String storedReport = prefs.getString("last_vpn_error_report", "");
-        // Lambdas below capture this immutable value; Java requires captured
-        // local variables to be final or effectively final.
-        final String diagnosticReport = storedReport.isEmpty()
-                ? AbolixDiagnostics.formatReport(this, "صفحه اصلی", rawMessage)
-                : storedReport;
-        AbolixDiagnostics.Issue issue = AbolixDiagnostics.classify(rawMessage);
-        lastShownVpnErrorId = errorId;
-        prefs.edit().putBoolean("last_vpn_error_pending", false).apply();
-
-        String visibleMessage = issue.title + "\n\n" + issue.suggestion
-                + "\n\nخطای اصلی:\n" + (rawMessage == null ? "خطای نامشخص" : rawMessage)
-                + "\n\nگزارش تشخیصی شامل لینک اشتراک، UUID یا رمز کانفیگ نیست. فقط با انتخاب خودت به اشتراک گذاشته می‌شود.";
-        new AlertDialog.Builder(this)
-                .setTitle("اتصال Abolix برقرار نشد · " + issue.code)
-                .setMessage(visibleMessage)
-                .setPositiveButton("ارسال گزارش برای سازنده", (dialog, which) -> shareDiagnosticReport(diagnosticReport))
-                .setNeutralButton("کپی گزارش", (dialog, which) -> copyDiagnosticReport(diagnosticReport))
-                .setNegativeButton("بستن", null)
-                .show();
-    }
-
-    private void shareDiagnosticReport(String report) {
-        try {
-            Intent send = new Intent(Intent.ACTION_SEND);
-            send.setType("text/plain");
-            send.putExtra(Intent.EXTRA_SUBJECT, "Abolix connection issue report");
-            send.putExtra(Intent.EXTRA_TEXT, report);
-            startActivity(Intent.createChooser(send, "ارسال گزارش خطای Abolix"));
-        } catch (RuntimeException error) {
-            Toast.makeText(this, "بازکردن برنامه اشتراک‌گذاری ممکن نشد: " + concise(error), Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void copyDiagnosticReport(String report) {
-        try {
-            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            if (clipboard == null) throw new IllegalStateException("Clipboard در دسترس نیست");
-            clipboard.setPrimaryClip(ClipData.newPlainText("Abolix diagnostic report", report));
-            Toast.makeText(this, "گزارش خطا کپی شد", Toast.LENGTH_SHORT).show();
-        } catch (RuntimeException error) {
-            Toast.makeText(this, "کپی گزارش ناموفق بود: " + concise(error), Toast.LENGTH_LONG).show();
-        }
+        if (connectionState != null) connectionState.setText(message == null ? (connected ? "تونل فعال است" : "قطع") : message);
+        if (headerStatus != null) headerStatus.setText(connected ? "اتصال برقرار است" : "اتصال امن و هوشمند");
     }
 
     private ProxyNode selectedNode() {

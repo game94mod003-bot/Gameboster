@@ -1,45 +1,46 @@
-# Abolix connection-fix package
+# Abolix reliability update
 
-## Fix from the supplied device screenshot
+## Core startup
+- Replaced the preflight `Libbox.checkConfig()` call with `Libbox.formatConfig()`. `FormatConfig` parses/normalizes the JSON without constructing a second temporary engine with a stub platform TUN. The real `CommandServer.startOrReloadService()` remains the authoritative engine/TUN startup and returns the actual sing-box error.
+- Separated libbox base, working, and temporary directories and create them before `Libbox.setup()`.
+- Added the libbox OOM/power draft initialization hooks used by the official Android sing-box client when those hooks exist in the pinned libbox build.
+- Added startup-stage Logcat/notification/app status updates so the user sees which exact phase is running instead of an opaque spinner.
+- Switched the VPN foreground service to Android's `systemExempted` type and matching permission, following the official sing-box Android VPN service declaration. The VPN service is non-exported.
+- Fixed restoration of VPN status on Activity resume to read the same private preferences written by the service.
 
-The observed fatal error was:
+## Importer
+- Added URI-style VMess links (`vmess://uuid@host:port?...`) in addition to the classic Base64 JSON VMess format.
+- Added the `shadowsocks://` alias alongside `ss://`.
+- Added regression tests for both new forms.
+- Fixed a JSONC parser defect that duplicated every character inside quoted JSON strings; this broke sing-box/Xray JSON imports even when the supplied JSON was valid. Added coverage for escaped quotes and `//` inside a JSON string.
 
-`start dns/https[cloudflare-doh]: detour to an empty direct outbound makes no sense`
+## Supported format boundary
+- Supported: VLESS (TLS/REALITY, WS, gRPC, HTTP/2, HTTPUpgrade, Vision flow), VMess (Base64 JSON and URI form), Trojan, Shadowsocks SIP002/legacy links, Hysteria/Hysteria2, TUIC, AnyTLS, SOCKS and HTTP(S), Clash YAML, sing-box JSON and supported Xray JSON outbound forms.
+- Not supported by upstream sing-box 1.14.4: ShadowsocksR (`ssr://`) and XHTTP/mKCP transports. These are explicitly rejected rather than silently mis-imported. WireGuard needs the sing-box `endpoints[]` model and is not represented by this app's single-outbound node model yet.
 
-The app-generated `SingBoxConfig` attached `"detour": "direct"` to a new-format HTTPS DNS server. That field is removed. sing-box 1.14 DNS server dialers already use the default dialer; an explicit detour to an empty direct outbound is invalid.
+## Validation performed in this workspace
+- ZIP integrity and file inventory checks.
+- XML parsing of AndroidManifest.xml and resource XML.
+- YAML parsing of GitHub Actions workflow.
+- Source-level review against sing-box/libbox 1.14.x API and the official Android client implementation.
 
-Reference: https://github.com/SagerNet/sing-box/issues/3585
+## Not claimed
+This workspace has no Android SDK, Gradle executable, emulator, or Android device. Therefore no APK compilation, libbox JNI runtime test, real VPN handshake, traffic-forwarding test, or on-device protocol test is claimed. GitHub Actions runs the importer unit tests and Android assemble task; final connection validation still requires the user's device and a live working subscription.
 
-## Error reporting
+## BuildConfig generation (AGP 8.x)
 
-- 67 local signatures classify common DNS, network, TLS, Reality, VPN, libbox, profile, subscription, and Android failures.
-- Connection failures create a persistent diagnostic report and a high-priority Android notification.
-- When the app is open, it displays a dialog with error code, explanation, next step, and actions to share/copy the report.
-- Report fields: timestamp, app version, device manufacturer/model, Android version, startup stage, classified issue and sanitized error.
-- Share is always user-initiated. Profile links, UUIDs, credentials and complete configuration are redacted/omitted.
-
-## Smaller APK output
-
-- Gradle produces `arm64-v8a` and `armeabi-v7a` APKs separately; no universal APK is produced.
-- Release builds run R8 and resource shrinking, with keep rules for the reflectively accessed libbox API.
-- Use the arm64 APK on most current Android phones; use armeabi-v7a only on 32-bit ARM devices.
-
-## Regression checks added
-
-- Generated HTTPS DNS has no `detour` property.
-- The diagnostic signature catalog contains at least 50 cases.
-- The supplied DNS failure maps to `ABX-DNS-001`.
-
-A complete Android Gradle build and a real VPN connection test must still run in GitHub Actions and on the target device; this local environment has no Android SDK/Gradle installation.
-
-
-## Build fix 1.0.2
-- Fixed Java compile error in `MainActivity.showPendingConnectionError`: report selection now produces an immutable `diagnosticReport` value captured by both AlertDialog lambdas.
-- Bumped app version name to 1.0.2.
+Enabled `android.buildFeatures.buildConfig` in `app/build.gradle`. Android Gradle Plugin 8.0+ disables `BuildConfig` generation by default, while `AbolixVpnService` reads `BuildConfig.DEBUG`, `BuildConfig.VERSION_CODE`, and `BuildConfig.VERSION_NAME` when initializing libbox. This fixes the reported `cannot find symbol: BuildConfig` compile failure for both debug and release variants.
 
 
-## Connection stability update 1.0.3
+## Game Center / Booster addition
+- Added package-visibility-scoped launcher discovery and game launching without `QUERY_ALL_PACKAGES`.
+- Added public Android telemetry for total/available RAM, thermal status (API 29+), battery level/temperature/charging, power-save mode, current/supported display refresh rates, and current display mode resolution.
+- Added automatic advisory and manual performance/balanced/cool-down/power-saver profiles. These are recommendations only; the app does not claim to overclock or tune another app's CPU/GPU, force its frame rate, read its real FPS, or terminate other processes.
+- Added a 5-second foreground-only dashboard refresh loop, stop-on-pause lifecycle handling, system settings shortcuts, and unit tests for profile selection.
+- Updated app label and README documentation.
 
-The previous `loadNetworkInterfaces()` implementation iterated over all Android networks and did not exclude `TRANSPORT_VPN` or the interface name registered by libbox via `registerMyInterface`. It could therefore expose the active VPN/TUN interface to sing-box's physical-interface discovery, creating an avoidable self-routing candidate. The updated implementation filters those interfaces and includes regression tests for VPN, TUN, Wi-Fi, and cellular cases.
+## Reported Java compiler failures
 
-This does not establish the cause of the reported process crash. A native SIGSEGV/SIGABRT or Android runtime exception must be confirmed from device Logcat.
+- `ProxyNode.getOutbound()` declares `throws JSONException`, matching `new JSONObject(...)`; its callers propagate the checked exception through the existing config-building methods and unit tests.
+- `AbolixVpnService.addExcludedRoutes()` resolves the route address with `InetAddress.getByName(...)` before constructing `IpPrefix`. Android 13+ exposes the `IpPrefix(InetAddress, int)` constructor, not a `String` constructor.
+- The matching source snapshot already contained these two corrections; they were rechecked while preparing this ZIP. `buildFeatures.buildConfig true` addresses the separate AGP 8 `BuildConfig` generation issue.

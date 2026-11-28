@@ -30,9 +30,7 @@ public final class AbolixVpnService extends VpnService {
     public static final String EXTRA_NODE = "node";
     private static final String TAG = "AbolixVPN";
     private static final String CHANNEL = "abolix_vpn";
-    private static final String ERROR_CHANNEL = "abolix_errors";
     private static final int NOTIFICATION_ID = 4107;
-    private static final int ERROR_NOTIFICATION_ID = 4108;
     private static volatile AbolixVpnService instance;
     private static volatile boolean libboxInitialized;
     private static final Object LIBBOX_SETUP_LOCK = new Object();
@@ -100,13 +98,7 @@ public final class AbolixVpnService extends VpnService {
             lifecycleGeneration++;
             starting = false;
         }
-        // State is written by the explicit stop/revoke/error path. Do not emit a
-        // generic "disconnected" event here: that used to overwrite the useful
-        // startup error immediately after stopSelf() was called.
-        synchronized (coreLock) {
-            closeEngineCore();
-            stopForeground(true);
-        }
+        stopEngine();
         defaultInterfaceListener = null;
         if (instance == this) instance = null;
         super.onDestroy();
@@ -143,25 +135,7 @@ public final class AbolixVpnService extends VpnService {
             starting = true;
             startGeneration = ++lifecycleGeneration;
         }
-        clearPreviousFailure();
-        try {
-            // Promote the service immediately: Android 8+ may terminate a service
-            // started with startForegroundService() if this call is delayed.
-            startForegroundCompat("در حال اتصال · " + requestedNode);
-        } catch (Throwable foregroundError) {
-            synchronized (this) {
-                if (lifecycleGeneration == startGeneration) {
-                    lifecycleGeneration++;
-                    starting = false;
-                }
-            }
-            String message = "اندروید اجازه‌ی اجرای سرویس VPN در پیش‌زمینه را نداد: " + safeMessage(foregroundError);
-            Log.e(TAG, message, foregroundError);
-            stopWithError(message);
-            stopSelf(startId);
-            return START_NOT_STICKY;
-        }
-        broadcastConnectingStatus("در حال اتصال به " + requestedNode + "…");
+        startForegroundCompat("در حال اتصال · " + requestedNode);
         armStartupWatchdog(startGeneration);
         new Thread(() -> {
             try {
@@ -176,7 +150,6 @@ public final class AbolixVpnService extends VpnService {
                 }
                 if (!isCurrentGeneration(startGeneration)) return;
                 cancelStartupWatchdog(startGeneration);
-                clearPreviousFailure();
                 broadcastState(true, "متصل به " + currentNode);
                 updateNotification("متصل · " + currentNode);
             } catch (Throwable error) {
@@ -211,7 +184,12 @@ public final class AbolixVpnService extends VpnService {
                 startupWatchdogGeneration = -1L;
                 String message = "راه‌اندازی بیش از 45 ثانیه در این مرحله متوقف ماند: " + startupStage
                         + ". اتصال کامل نشد؛ گزارش Abolix را بررسی کن.";
-                new Thread(() -> stopWithError(message), "Abolix-Core-Timeout-Cleanup").start();
+                broadcastState(false, message);
+                updateNotification(message);
+                new Thread(() -> {
+                    synchronized (coreLock) { closeEngineCore(); }
+                    stopForeground(true);
+                }, "Abolix-Core-Timeout-Cleanup").start();
             }
         };
         mainHandler.postDelayed(startupWatchdog, 45000L);
@@ -484,16 +462,8 @@ public final class AbolixVpnService extends VpnService {
             android.net.NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
             if (link == null || capabilities == null) continue;
             String interfaceName = link.getInterfaceName();
-            // Never expose the active VPN network (especially our own TUN) as a
-            // physical uplink. sing-box uses this list for interface detection;
-            // returning tun0 here can make the proxy route back into its own TUN.
-            if (AbolixNetworkFilter.shouldSkip(interfaceName, tunInterfaceName,
-                    capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN))) {
-                Log.d(TAG, "Skipping VPN/TUN interface during physical interface discovery: " + interfaceName);
-                continue;
-            }
             java.net.NetworkInterface systemInterface = systemInterfaces.get(interfaceName);
-            if (systemInterface == null) continue;
+            if (interfaceName == null || interfaceName.isEmpty() || systemInterface == null) continue;
 
             Object boxInterface = libboxInterfaceType.getDeclaredConstructor().newInstance();
             setPropertyRequired(boxInterface, "Name", interfaceName);
@@ -622,7 +592,7 @@ public final class AbolixVpnService extends VpnService {
         startupStage = stage;
         Log.i(TAG, "Startup: " + stage);
         updateNotification("راه‌اندازی هسته · " + stage);
-        broadcastConnectingStatus("راه‌اندازی هسته: " + stage);
+        broadcastState(false, "راه‌اندازی هسته: " + stage);
     }
 
     private static void setPropertyRequired(Object target, String property, Object value) throws Exception {
@@ -1034,93 +1004,16 @@ public final class AbolixVpnService extends VpnService {
 
     private void stopWithError(String message) {
         Log.e(TAG, message);
-        cancelStartupWatchdog();
-        synchronized (coreLock) {
-            closeEngineCore();
-            stopForeground(true);
-        }
-        synchronized (this) { starting = false; }
-
-        AbolixDiagnostics.Issue issue = AbolixDiagnostics.classify(message);
-        String displayMessage = issue.code + " · " + message;
-        String report = AbolixDiagnostics.formatReport(this, startupStage, message);
-        android.content.SharedPreferences prefs = getSharedPreferences("abolix_secure_store", MODE_PRIVATE);
-        prefs.edit()
-                .putString("last_vpn_error_code", issue.code)
-                .putString("last_vpn_error_message", message)
-                .putString("last_vpn_error_report", report)
-                .putString("last_vpn_error_id", String.valueOf(System.currentTimeMillis()))
-                .putBoolean("last_vpn_error_pending", true)
-                .apply();
-
-        broadcastState(false, displayMessage);
-        postErrorNotification(issue);
+        stopEngine();
+        broadcastState(false, message);
         stopSelf();
     }
 
-    private void clearPreviousFailure() {
-        getSharedPreferences("abolix_secure_store", MODE_PRIVATE).edit()
-                .putBoolean("last_vpn_error_pending", false).apply();
-        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (manager != null) manager.cancel(ERROR_NOTIFICATION_ID);
-    }
-
-    private void postErrorNotification(AbolixDiagnostics.Issue issue) {
-        try {
-            if (Build.VERSION.SDK_INT >= 26) {
-                NotificationChannel channel = new NotificationChannel(ERROR_CHANNEL,
-                        "خطاهای اتصال Abolix", NotificationManager.IMPORTANCE_HIGH);
-                channel.setDescription("هشدارهای خطای اتصال و گزارش تشخیصی Abolix");
-                channel.enableVibration(true);
-                getSystemService(NotificationManager.class).createNotificationChannel(channel);
-            }
-            Intent launch = new Intent(this, MainActivity.class);
-            launch.setAction("com.abolix.gamebooster.action.SHOW_ERROR_REPORT");
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            PendingIntent pending = PendingIntent.getActivity(this, ERROR_NOTIFICATION_ID, launch,
-                    Build.VERSION.SDK_INT >= 23
-                            ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
-                            : PendingIntent.FLAG_UPDATE_CURRENT);
-            Notification.Builder builder = Build.VERSION.SDK_INT >= 26
-                    ? new Notification.Builder(this, ERROR_CHANNEL) : new Notification.Builder(this);
-            builder.setSmallIcon(R.drawable.ic_stat_abolix)
-                    .setContentTitle("Abolix · اتصال ناموفق")
-                    .setContentText("برای رفع مشکل در به‌روزرسانی بعدی، گزارش را برای سازنده بفرستید.")
-                    .setStyle(new Notification.BigTextStyle().bigText(issue.code + " · " + issue.title
-                            + "\nبرای کمک به رفع مشکل در به‌روزرسانی بعدی، گزارش تشخیصی را برای سازنده Abolix بفرستید."))
-                    .setContentIntent(pending)
-                    .setAutoCancel(true)
-                    .setOngoing(false)
-                    .setOnlyAlertOnce(false);
-            if (Build.VERSION.SDK_INT < 26) builder.setPriority(Notification.PRIORITY_HIGH);
-            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-            if (manager != null) manager.notify(ERROR_NOTIFICATION_ID, builder.build());
-        } catch (SecurityException denied) {
-            Log.w(TAG, "Notification permission denied; in-app error dialog will remain available", denied);
-        } catch (RuntimeException notificationError) {
-            Log.w(TAG, "Could not display connection error notification", notificationError);
-        }
-    }
-
     private void broadcastState(boolean connected, String message) {
-        broadcastStatus(connected, false, message);
-    }
-
-    private void broadcastConnectingStatus(String message) {
-        broadcastStatus(false, true, message);
-    }
-
-    private void broadcastStatus(boolean connected, boolean connecting, String message) {
         android.content.SharedPreferences prefs = getSharedPreferences("abolix_secure_store", MODE_PRIVATE);
-        prefs.edit()
-                .putBoolean("vpn_connected", connected)
-                .putBoolean("vpn_connecting", connecting)
-                .putString("vpn_status", message == null ? "" : message)
-                .apply();
+        prefs.edit().putBoolean("vpn_connected", connected).putString("vpn_status", message).apply();
         Intent state = new Intent(ACTION_STATE).setPackage(getPackageName());
-        state.putExtra("connected", connected)
-                .putExtra("connecting", connecting)
-                .putExtra("message", message);
+        state.putExtra("connected", connected).putExtra("message", message);
         sendBroadcast(state);
     }
 

@@ -48,7 +48,8 @@ public final class SingBoxConfig {
                         .put("server", "1.1.1.1")
                         .put("server_port", 443)
                         .put("path", "/dns-query")
-                        .put("tls", new JSONObject().put("enabled", true).put("server_name", "cloudflare-dns.com"))))
+                        .put("tls", new JSONObject().put("enabled", true).put("server_name", "cloudflare-dns.com"))
+                        .put("detour", "direct")))
                 .put("final", "cloudflare-doh")
                 .put("strategy", "prefer_ipv4")
                 .put("optimistic", new JSONObject().put("enabled", true).put("timeout", "3h"));
