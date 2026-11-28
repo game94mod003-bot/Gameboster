@@ -484,8 +484,16 @@ public final class AbolixVpnService extends VpnService {
             android.net.NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
             if (link == null || capabilities == null) continue;
             String interfaceName = link.getInterfaceName();
+            // Never expose the active VPN network (especially our own TUN) as a
+            // physical uplink. sing-box uses this list for interface detection;
+            // returning tun0 here can make the proxy route back into its own TUN.
+            if (AbolixNetworkFilter.shouldSkip(interfaceName, tunInterfaceName,
+                    capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN))) {
+                Log.d(TAG, "Skipping VPN/TUN interface during physical interface discovery: " + interfaceName);
+                continue;
+            }
             java.net.NetworkInterface systemInterface = systemInterfaces.get(interfaceName);
-            if (interfaceName == null || interfaceName.isEmpty() || systemInterface == null) continue;
+            if (systemInterface == null) continue;
 
             Object boxInterface = libboxInterfaceType.getDeclaredConstructor().newInstance();
             setPropertyRequired(boxInterface, "Name", interfaceName);

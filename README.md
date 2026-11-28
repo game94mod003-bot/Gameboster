@@ -99,3 +99,10 @@ Android's documented permission order is `VpnService.prepare()` → user consent
 - APKs are split into `arm64-v8a` and `armeabi-v7a` builds; no universal APK is produced. Most recent Android phones use `arm64-v8a`. This prevents shipping multiple CPU copies of the native libbox library in each install.
 - Release builds enable R8 code shrinking and resource shrinking; libbox Java API symbols are kept because the Android bridge calls them reflectively.
 - CI regression tests cover the generated DNS detour and diagnostic classification.
+
+
+## Connection stability update 1.0.3
+
+- Physical-uplink discovery now excludes every Android network carrying `TRANSPORT_VPN` and the TUN interface name reported by libbox through `registerMyInterface`. This prevents the active VPN from being offered back to sing-box as a physical network candidate.
+- Added pure-Java regression tests for VPN/TUN filtering and for retaining Wi-Fi/cellular interfaces.
+- This is a source-level routing-loop prevention fix. It does not prove or identify a native process crash without a device crash trace.

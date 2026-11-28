@@ -36,3 +36,10 @@ A complete Android Gradle build and a real VPN connection test must still run in
 ## Build fix 1.0.2
 - Fixed Java compile error in `MainActivity.showPendingConnectionError`: report selection now produces an immutable `diagnosticReport` value captured by both AlertDialog lambdas.
 - Bumped app version name to 1.0.2.
+
+
+## Connection stability update 1.0.3
+
+The previous `loadNetworkInterfaces()` implementation iterated over all Android networks and did not exclude `TRANSPORT_VPN` or the interface name registered by libbox via `registerMyInterface`. It could therefore expose the active VPN/TUN interface to sing-box's physical-interface discovery, creating an avoidable self-routing candidate. The updated implementation filters those interfaces and includes regression tests for VPN, TUN, Wi-Fi, and cellular cases.
+
+This does not establish the cause of the reported process crash. A native SIGSEGV/SIGABRT or Android runtime exception must be confirmed from device Logcat.
